@@ -133,14 +133,16 @@ def run_direct_check(args, kernel, device, dtype):
     with torch.no_grad():
         out_ref = kernel.topp_attention_reference(**inputs)
         out_flash = kernel.topp_flash_attention(
-            **inputs, block_windows=args.block_windows)
+            **inputs, block_windows=args.block_windows, backend=args.backend)
     abs_err, rel_err = max_error(out_flash, out_ref)
 
     ref_grad_inputs = clone_for_grad(inputs)
     flash_grad_inputs = clone_for_grad(inputs)
     out_ref = kernel.topp_attention_reference(**ref_grad_inputs)
     out_flash = kernel.topp_flash_attention(
-        **flash_grad_inputs, block_windows=args.block_windows)
+        **flash_grad_inputs,
+        block_windows=args.block_windows,
+        backend=args.backend)
     out_ref.square().mean().backward()
     out_flash.square().mean().backward()
     grad_errors = {}
@@ -154,10 +156,11 @@ def run_direct_check(args, kernel, device, dtype):
         args.warmup)
     flash_time, flash_memory = benchmark(
         lambda: kernel.topp_flash_attention(
-            **inputs, block_windows=args.block_windows), device, args.repeat,
-        args.warmup)
+            **inputs, block_windows=args.block_windows, backend=args.backend),
+        device, args.repeat, args.warmup)
 
     print('direct_check:')
+    print(f'  backend: {args.backend}')
     print(f'  device: {device}')
     print(f'  dtype: {dtype}')
     print(f'  forward_max_abs_error: {abs_err:.6e}')
@@ -166,10 +169,10 @@ def run_direct_check(args, kernel, device, dtype):
         print(f'  grad_{name}_max_abs_error: {abs_grad:.6e}')
         print(f'  grad_{name}_max_rel_error: {rel_grad:.6e}')
     print(f'  reference_time_ms: {ref_time:.4f}')
-    print(f'  block_time_ms: {flash_time:.4f}')
+    print(f'  selected_backend_time_ms: {flash_time:.4f}')
     if ref_memory is not None and flash_memory is not None:
         print(f'  reference_peak_memory_mb: {ref_memory:.2f}')
-        print(f'  block_peak_memory_mb: {flash_memory:.2f}')
+        print(f'  selected_backend_peak_memory_mb: {flash_memory:.2f}')
 
 
 def run_full_module_check(args, device):
@@ -196,6 +199,7 @@ def run_full_module_check(args, device):
     flash = copy.deepcopy(ref).to(device).eval()
     flash.use_topp_flash = True
     flash.topp_flash_block_windows = args.block_windows
+    flash.topp_flash_backend = args.backend
 
     x = torch.randn(1, 14, 14, args.dim, device=device)
     with torch.no_grad():
@@ -222,10 +226,10 @@ def run_full_module_check(args, device):
     print(f'  input_grad_max_abs_error: {grad_abs:.6e}')
     print(f'  input_grad_max_rel_error: {grad_rel:.6e}')
     print(f'  reference_time_ms: {ref_time:.4f}')
-    print(f'  block_time_ms: {flash_time:.4f}')
+    print(f'  selected_backend_time_ms: {flash_time:.4f}')
     if ref_memory is not None and flash_memory is not None:
         print(f'  reference_peak_memory_mb: {ref_memory:.2f}')
-        print(f'  block_peak_memory_mb: {flash_memory:.2f}')
+        print(f'  selected_backend_peak_memory_mb: {flash_memory:.2f}')
 
 
 def parse_args():
@@ -242,6 +246,10 @@ def parse_args():
     parser.add_argument('--topk', type=int, default=16)
     parser.add_argument('--kv-len', type=int, default=4)
     parser.add_argument('--block-windows', type=int, default=16)
+    parser.add_argument(
+        '--backend',
+        default='torch_block',
+        choices=['torch_block', 'block', 'torch', 'cuda', 'cuda_forward'])
     parser.add_argument('--warmup', type=int, default=10)
     parser.add_argument('--repeat', type=int, default=50)
     parser.add_argument('--seed', type=int, default=7)

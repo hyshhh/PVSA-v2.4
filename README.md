@@ -1,3 +1,5 @@
+PVSA v3.0 CUDA 核分支说明：[README_PVSA_v3.0.md](README_PVSA_v3.0.md)
+
 PVSA v2.0 分支说明：[README_PVSA_v2.0.md](README_PVSA_v2.0.md)
 
 <div align="center">

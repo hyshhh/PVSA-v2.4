@@ -7,13 +7,20 @@ before replacing the inner block with a hand-written CUDA kernel.
 """
 
 import os
+import warnings
+from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
+from torch.utils.cpp_extension import CUDA_HOME, load
 
 
 _TORCH_BACKENDS = {'torch', 'torch_block', 'block'}
+_CUDA_BACKENDS = {'cuda', 'cuda_forward'}
+_CUDA_EXTENSION = None
+_CUDA_EXTENSION_ERROR = None
+_CUDA_FALLBACK_WARNED = False
 
 
 def _normalize_backend(backend: Optional[str] = None) -> str:
@@ -26,8 +33,8 @@ def is_topp_flash_available(backend: Optional[str] = None) -> bool:
     backend = _normalize_backend(backend)
     if backend in _TORCH_BACKENDS:
         return True
-    if backend == 'cuda':
-        return False
+    if backend in _CUDA_BACKENDS:
+        return _can_build_cuda_extension()
     return False
 
 
@@ -96,12 +103,91 @@ def topp_flash_attention(q_pix: Tensor,
                          backend: Optional[str] = None) -> Tensor:
     """Compute routed attention without materializing the full kv_gather tensor."""
     backend = _normalize_backend(backend)
-    if backend not in _TORCH_BACKENDS:
+    if backend in _TORCH_BACKENDS:
+        return _ToppBlockAttentionFunction.apply(
+            q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim, dim,
+            float(scale), n_win, H, W, int(block_windows))
+    if backend in _CUDA_BACKENDS:
+        if _can_run_cuda_forward(q_pix, kv_pix, r_weight, r_idx, r_mask):
+            try:
+                return _ToppCudaForwardFunction.apply(
+                    q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads,
+                    qk_dim, dim, float(scale), n_win, H, W,
+                    int(block_windows))
+            except Exception as exc:
+                if _strict_cuda_backend():
+                    raise
+                _warn_cuda_fallback(str(exc))
+        if _strict_cuda_backend():
+            raise RuntimeError(
+                'PVSA CUDA backend is requested but cannot run with the '
+                'current device, dtype, or build environment.')
+        else:
+            _warn_cuda_fallback()
+        return _ToppBlockAttentionFunction.apply(
+            q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim, dim,
+            float(scale), n_win, H, W, int(block_windows))
+    else:
         raise RuntimeError(
             f'topp flash backend {backend!r} is unavailable in this build.')
-    return _ToppBlockAttentionFunction.apply(
-        q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim, dim,
-        float(scale), n_win, H, W, int(block_windows))
+
+
+class _ToppCudaForwardFunction(torch.autograd.Function):
+    """CUDA forward with the existing recompute backward path."""
+
+    @staticmethod
+    def forward(ctx, q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
+                r_idx: Tensor, r_mask: Tensor, num_heads: int, qk_dim: int,
+                dim: int, scale: float, n_win: int, H: int, W: int,
+                block_windows: int) -> Tensor:
+        q_pix = q_pix.contiguous()
+        kv_pix = kv_pix.contiguous()
+        r_weight = r_weight.contiguous()
+        r_idx = r_idx.contiguous().long()
+        r_mask = r_mask.contiguous().bool()
+        ctx.save_for_backward(q_pix, kv_pix, r_weight, r_idx, r_mask)
+        ctx.params = (num_heads, qk_dim, dim, scale, n_win, H, W,
+                      block_windows)
+        extension = _load_cuda_extension()
+        return extension.forward(q_pix, kv_pix, r_weight, r_idx, r_mask,
+                                 num_heads, qk_dim, dim, float(scale),
+                                 n_win, H, W)
+
+    @staticmethod
+    def backward(ctx, grad_out: Tensor) -> Tuple[Optional[Tensor], ...]:
+        q_pix, kv_pix, r_weight, r_idx, r_mask = ctx.saved_tensors
+        num_heads, qk_dim, dim, scale, n_win, H, W, block_windows = ctx.params
+
+        needs = ctx.needs_input_grad
+        with torch.enable_grad():
+            q = q_pix.detach().requires_grad_(needs[0])
+            kv = kv_pix.detach().requires_grad_(needs[1])
+            rw = r_weight.detach().requires_grad_(needs[2])
+            out = _topp_attention_block_impl(
+                q, kv, rw, r_idx, r_mask, num_heads, qk_dim, dim, scale,
+                n_win, H, W, block_windows)
+
+        targets = []
+        positions = []
+        if needs[0]:
+            targets.append(q)
+            positions.append(0)
+        if needs[1]:
+            targets.append(kv)
+            positions.append(1)
+        if needs[2]:
+            targets.append(rw)
+            positions.append(2)
+
+        grads = [None, None, None]
+        if targets:
+            computed = torch.autograd.grad(
+                out, targets, grad_out.contiguous(), allow_unused=True)
+            for pos, grad in zip(positions, computed):
+                grads[pos] = grad
+
+        return (grads[0], grads[1], grads[2], None, None, None, None, None,
+                None, None, None, None, None)
 
 
 class _ToppBlockAttentionFunction(torch.autograd.Function):
@@ -236,6 +322,74 @@ def _unflatten_windows(flat_out: Tensor, n: int, n_win: int, H: int, W: int,
     q_w = W // n_win
     return flat_out.view(n, n_win, n_win, q_h, q_w, dim).permute(
         0, 1, 3, 2, 4, 5).reshape(n, H, W, dim).contiguous()
+
+
+def _can_build_cuda_extension() -> bool:
+    if not torch.cuda.is_available() or CUDA_HOME is None:
+        return False
+    cpp_path, cu_path = _cuda_source_paths()
+    return cpp_path.exists() and cu_path.exists()
+
+
+def _can_run_cuda_forward(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
+                          r_idx: Tensor, r_mask: Tensor) -> bool:
+    if not _can_build_cuda_extension():
+        return False
+    tensors = (q_pix, kv_pix, r_weight, r_idx, r_mask)
+    if not all(tensor.is_cuda for tensor in tensors):
+        return False
+    if q_pix.dtype != torch.float32:
+        return False
+    if kv_pix.dtype != torch.float32 or r_weight.dtype != torch.float32:
+        return False
+    return r_idx.dtype == torch.long and r_mask.dtype == torch.bool
+
+
+def _cuda_source_paths() -> Tuple[Path, Path]:
+    root = Path(__file__).resolve().parents[3]
+    op_dir = root / 'mmseg' / 'ops' / 'topp_flash'
+    return op_dir / 'topp_flash.cpp', op_dir / 'topp_flash_cuda.cu'
+
+
+def _load_cuda_extension():
+    global _CUDA_EXTENSION, _CUDA_EXTENSION_ERROR
+    if _CUDA_EXTENSION is not None:
+        return _CUDA_EXTENSION
+    if not _can_build_cuda_extension():
+        raise RuntimeError('PVSA CUDA extension build environment is missing.')
+
+    cpp_path, cu_path = _cuda_source_paths()
+    extra_cuda_cflags = ['-O3']
+    arch_list = os.getenv('PVSA_TOPP_FLASH_ARCH')
+    if arch_list:
+        os.environ['TORCH_CUDA_ARCH_LIST'] = arch_list
+    try:
+        _CUDA_EXTENSION = load(
+            name='pvsa_topp_flash_cuda',
+            sources=[str(cpp_path), str(cu_path)],
+            extra_cuda_cflags=extra_cuda_cflags,
+            verbose=os.getenv('PVSA_TOPP_FLASH_VERBOSE', '0') == '1')
+    except Exception as exc:
+        _CUDA_EXTENSION_ERROR = exc
+        raise
+    return _CUDA_EXTENSION
+
+
+def _strict_cuda_backend() -> bool:
+    return os.getenv('PVSA_TOPP_FLASH_STRICT_CUDA', '0') == '1'
+
+
+def _warn_cuda_fallback(reason: Optional[str] = None) -> None:
+    global _CUDA_FALLBACK_WARNED
+    if _CUDA_FALLBACK_WARNED:
+        return
+    message = (
+        'PVSA CUDA topp attention kernel is unavailable; fallback to '
+        'torch_block backend.')
+    if reason:
+        message = f'{message} Reason: {reason}'
+    warnings.warn(message)
+    _CUDA_FALLBACK_WARNED = True
 
 
 def _validate_inputs(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,

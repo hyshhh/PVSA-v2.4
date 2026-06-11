@@ -44,7 +44,8 @@ class Block(nn.Module):
                  topk=4, param_attention="qkvo", param_routing=False, diff_routing=False, soft_routing=False,
                  mlp_ratio=4, mlp_dwconv=False,
                  side_dwconv=5, before_attn_dwconv=3, pre_norm=True, auto_pad=False,W=False,
-                 use_topp_flash=False, topp_flash_block_windows=64):
+                 use_topp_flash=False, topp_flash_block_windows=64,
+                 topp_flash_backend=None):
         super().__init__()
         qk_dim = qk_dim or dim
 
@@ -76,7 +77,8 @@ class Block(nn.Module):
                                                 side_dwconv=side_dwconv,
                                                 auto_pad=auto_pad,W=self.W,
                                                 use_topp_flash=use_topp_flash,
-                                                topp_flash_block_windows=topp_flash_block_windows)
+                                                topp_flash_block_windows=topp_flash_block_windows,
+                                                topp_flash_backend=topp_flash_backend)
         elif topk == -1:
             self.attn = Attention(dim=dim)
         elif topk == -2:
@@ -359,12 +361,14 @@ class VTFormer(nn.Module):
                  norm_eval=False,
                  W=False,
                  use_topp_flash=False,
-                 topp_flash_block_windows=64):
+                 topp_flash_block_windows=64,
+                 topp_flash_backend=None):
 
         super().__init__()
         self.W=W
         self.use_topp_flash = use_topp_flash
         self.topp_flash_block_windows = topp_flash_block_windows
+        self.topp_flash_backend = topp_flash_backend
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.norm_eval = norm_eval
@@ -488,7 +492,8 @@ class VTFormer(nn.Module):
                         auto_pad=auto_pad,
                         W=self.W,
                         use_topp_flash=self.use_topp_flash,
-                        topp_flash_block_windows=self.topp_flash_block_windows) for j in range(depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
+                        topp_flash_block_windows=self.topp_flash_block_windows,
+                        topp_flash_backend=self.topp_flash_backend) for j in range(depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
