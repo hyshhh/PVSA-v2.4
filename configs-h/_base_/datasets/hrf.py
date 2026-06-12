@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'HRFDataset'
-data_root = 'data/HRF'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/HRF'
 img_scale = (2336, 3504)
 crop_size = (256, 256)
 train_pipeline = [

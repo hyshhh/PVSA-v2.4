@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'STAREDataset'
-data_root = 'data/STARE'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/STARE'
 img_scale = (605, 700)
 crop_size = (128, 128)
 train_pipeline = [

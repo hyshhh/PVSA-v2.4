@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'ADE20KDataset'
-data_root = 'data/ade/ADEChallengeData2016'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/ade/ADEChallengeData2016'
 crop_size = (640, 640)
 train_pipeline = [
     dict(type='LoadImageFromFile'),

@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'LoveDADataset'
-data_root = 'data/loveDA'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/loveDA'
 crop_size = (512, 512)
 train_pipeline = [
     dict(type='LoadImageFromFile'),

@@ -8,7 +8,7 @@ data_preprocessor = dict(size=crop_size)
 model = dict(data_preprocessor=data_preprocessor)
 # dataset settings
 dataset_type = 'DSDLSegDataset'
-data_root = 'data/CityScapes'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/CityScapes'
 img_prefix = 'raw/CityScapes'
 train_ann = 'dsdl/dsdl_SemSeg_full/set-train/train.yaml'
 val_ann = 'dsdl/dsdl_SemSeg_full/set-val/val.yaml'

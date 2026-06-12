@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'BDD100KDataset'
-data_root = 'data/bdd100k/'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/bdd100k/'
 
 crop_size = (512, 1024)
 train_pipeline = [

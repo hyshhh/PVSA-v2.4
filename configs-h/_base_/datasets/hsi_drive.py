@@ -19,7 +19,7 @@ train_dataloader = dict(
     sampler=dict(type='InfiniteSampler', shuffle=True),
     dataset=dict(
         type='HSIDrive20Dataset',
-        data_root='data/HSIDrive20',
+        data_root='/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/HSIDrive20',
         data_prefix=dict(
             img_path='images/training', seg_map_path='annotations/training'),
         pipeline=train_pipeline))
@@ -31,7 +31,7 @@ val_dataloader = dict(
     sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
         type='HSIDrive20Dataset',
-        data_root='data/HSIDrive20',
+        data_root='/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/HSIDrive20',
         data_prefix=dict(
             img_path='images/validation',
             seg_map_path='annotations/validation'),
@@ -44,7 +44,7 @@ test_dataloader = dict(
     sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
         type='HSIDrive20Dataset',
-        data_root='data/HSIDrive20',
+        data_root='/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/HSIDrive20',
         data_prefix=dict(
             img_path='images/test', seg_map_path='annotations/test'),
         pipeline=test_pipeline))

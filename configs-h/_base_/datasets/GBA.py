@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'GBADataset'
-data_root = 'data/GBA-main'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/GBA-main'
 img_scale = (224, 224)
 crop_size = (224, 224)
 ##数据增强等操作配置

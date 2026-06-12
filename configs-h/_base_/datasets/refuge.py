@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'REFUGEDataset'
-data_root = 'data/REFUGE'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/REFUGE'
 train_img_scale = (2056, 2124)
 val_img_scale = (1634, 1634)
 test_img_scale = (1634, 1634)

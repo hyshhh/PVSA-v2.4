@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'PotsdamDataset'
-data_root = 'data/potsdam'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/potsdam'
 crop_size = (512, 512)
 train_pipeline = [
     dict(type='LoadImageFromFile'),

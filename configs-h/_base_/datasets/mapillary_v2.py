@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'MapillaryDataset_v2'
-data_root = 'data/mapillary/'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/mapillary/'
 crop_size = (512, 1024)
 train_pipeline = [
     dict(type='LoadImageFromFile'),

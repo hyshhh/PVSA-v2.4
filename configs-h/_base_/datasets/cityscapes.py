@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'CityscapesDataset'
-data_root = 'data/cityscapes_cleaned/'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/cityscapes_cleaned/'
 crop_size = (512, 512)
 train_pipeline = [
     dict(type='LoadImageFromFile'),

@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'DRIVEDataset'
-data_root = 'data/DRIVE'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/DRIVE'
 img_scale = (584, 565)
 crop_size = (64, 64)
 train_pipeline = [

@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'iSAIDDataset'
-data_root = 'data/iSAID'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/iSAID'
 """
 This crop_size setting is followed by the implementation of
 `PointFlow: Flowing Semantics Through Points for Aerial Image

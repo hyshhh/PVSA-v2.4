@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'NYUDataset'
-data_root = 'data/nyu'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/nyu'
 
 train_pipeline = [
     dict(type='LoadImageFromFile'),

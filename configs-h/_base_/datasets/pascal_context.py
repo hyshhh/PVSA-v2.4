@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'PascalContextDataset'
-data_root = 'data/VOCdevkit/VOC2010/'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/VOCdevkit/VOC2010/'
 
 img_scale = (520, 520)
 crop_size = (480, 480)

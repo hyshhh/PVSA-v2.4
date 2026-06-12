@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'LEVIRCDDataset'
-data_root = r'data/LEVIRCD'
+data_root = r'/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/LEVIRCD'
 
 albu_train_transforms = [
     dict(type='RandomBrightnessContrast', p=0.2),

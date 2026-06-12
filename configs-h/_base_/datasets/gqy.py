@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'YZSegDataset'
-data_root = 'data/gqyyz'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/gqyyz'
 img_scale = (256, 256)
 crop_size = (256, 256)
 ##数据增强等操作配置

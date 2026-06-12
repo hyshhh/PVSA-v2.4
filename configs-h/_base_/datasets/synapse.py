@@ -1,5 +1,5 @@
 dataset_type = 'SynapseDataset'
-data_root = 'data/synapse/'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/synapse/'
 img_scale = (224, 224)
 train_pipeline = [
     dict(type='LoadImageFromFile'),

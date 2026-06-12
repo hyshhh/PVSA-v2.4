@@ -5,7 +5,7 @@ _base_ = [
 
 # dataset settings
 dataset_type = 'DSDLSegDataset'
-data_root = 'data/PASCAL_VOC2012'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/PASCAL_VOC2012'
 img_prefix = 'raw/VOCdevkit/VOC2012'
 train_ann = 'dsdl/dsdl_SemSeg_full/set-train/train.yaml'
 val_ann = 'dsdl/dsdl_SemSeg_full/set-val/val.yaml'

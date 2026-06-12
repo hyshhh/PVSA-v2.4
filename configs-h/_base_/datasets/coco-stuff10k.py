@@ -1,6 +1,6 @@
 # dataset settings
 dataset_type = 'COCOStuffDataset'
-data_root = 'data/coco_stuff10k'
+data_root = '/media/ddc/新加卷/hys/ljf/mmsegmentation-main/mmsegmentation-main/data/coco_stuff10k'
 crop_size = (512, 512)
 train_pipeline = [
     dict(type='LoadImageFromFile'),
