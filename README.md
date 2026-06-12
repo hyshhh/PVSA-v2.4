@@ -87,6 +87,30 @@ python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   train_dataloader.batch_size=4
 ```
 
+### 训练配置
+
+| 配置项 | 值 | 说明 |
+|--------|----|------|
+| 训练轮数 | 200 epochs | 基于 `EpochBasedTrainLoop` |
+| 批量大小 | 4 | 单卡训练默认值 |
+| 学习率 | 6e-4 | AdamW 优化器 |
+| 验证间隔 | 10 epochs | 每 10 个 epoch 验证一次 |
+| 检查点保存间隔 | 10 epochs | 每 10 个 epoch 保存一次 |
+
+### 推荐硬件
+
+- **GPU**: NVIDIA RTX 3090 或更高（24GB 显存）
+- **显存需求**: 约 8-10GB（使用 `torch_block` 后端）
+
+### 训练环境
+
+| 项目 | 值 |
+|------|-----|
+| GPU | *待填写* |
+| CUDA | *待填写* |
+| PyTorch | *待填写* |
+| 显存占用 | *待填写* |
+
 注意：`configs-h/_base_/models/VTFormer-s.py` 只是模型片段配置，缺少数据集、训练循环、优化器、运行时作用域等内容，不能直接用于训练。直接使用它会导致运行器配置不完整，或触发 `EncoderDecoder` 注册表查找错误。
 
 ### 推理
