@@ -8,6 +8,7 @@ from .bi_topp_vote import VTFormer
 from timm.models.layers import LayerNorm2d
 from mmengine.runner import load_checkpoint
 import os
+import warnings
 import numpy as np
 import cv2 
 from PIL import Image
@@ -15,8 +16,30 @@ import torch
 import torch.nn.functional as F
 @MODELS.register_module()
 class BiFormer_fusion(VTFormer):
-    def __init__(self, pretrained=None, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self,
+                 pretrained=None,
+                 use_topp_flash=False,
+                 topp_flash_backend=None,
+                 topp_flash_block_windows=64,
+                 **kwargs):
+        try:
+            super().__init__(
+                use_topp_flash=use_topp_flash,
+                topp_flash_backend=topp_flash_backend,
+                topp_flash_block_windows=topp_flash_block_windows,
+                **kwargs)
+        except TypeError as exc:
+            flash_args = (
+                'use_topp_flash',
+                'topp_flash_backend',
+                'topp_flash_block_windows',
+            )
+            if not any(arg in str(exc) for arg in flash_args):
+                raise
+            if use_topp_flash or topp_flash_backend is not None:
+                warnings.warn(
+                    '当前 VTFormer 不支持 Top-P Flash 参数，已降级为普通注意力路径。')
+            super().__init__(**kwargs)
         self.extra_norms = nn.ModuleList()
         self.bn = nn.ModuleList()
         self.conv12=nn.ModuleList()
