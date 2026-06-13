@@ -47,17 +47,13 @@ model = dict(
         # Top-p attention backend switch.
         # 1) Original path: use_topp_flash=False. This keeps the old
         #    kv_gather -> attention implementation and uses the most memory.
-        # 2) PyTorch sparse path: set use_topp_flash=True and
-        #    topp_flash_backend='torch_block'. This avoids materializing the
-        #    full kv_gather tensor by processing routed windows in PyTorch
-        #    blocks. You may tune topp_flash_block_windows for memory/speed.
-        # 3) Custom CUDA path: set use_topp_flash=True and
+        # 2) CUDA path: set use_topp_flash=True and
         #    topp_flash_backend='cuda'. The CUDA kernel uses keep_len instead
         #    of r_mask internally and should be used on a server with a valid
         #    CUDA extension build toolchain. Set PVSA_TOPP_FLASH_STRICT_CUDA=1
         #    on the server if you want failures instead of fallback.
         use_topp_flash=True,
-        topp_flash_backend='torch_block',
+        topp_flash_backend='cuda',
         topp_flash_block_windows=16,
         use_pruned_kv_gather=False,
         use_fast_attention=False,

@@ -12,13 +12,13 @@
 - 按累积概率 `cumsum <= P` 进行截断
 - 保留概率质量集中的窗口，自动过滤噪声
 
-### 四种计算后端
+### 三种计算后端
 | 后端 | 配置 | 显存 | 速度 | 适用场景 |
 |------|------|------|------|----------|
 | **kv_gather** | `use_topp_flash=False` | 高 | 快 | 显存充足时使用 |
+| **kv_gather + fast** | `use_fast_attention=True` | 中 | 最快 | 推荐，Top-P 剪枝前移 |
 | **pruned_kv_gather** | `use_pruned_kv_gather=True` | 高 | 中 | 按 keep_len 裁剪无效路由 |
-| **torch_block** | `backend='torch_block'` | 中 | 中 | 默认推荐，显存受限 |
-| **cuda** | `backend='cuda'` | 低 | 慢 | 极致显存优化，需编译环境 |
+| **cuda** | `backend='cuda'` | 低 | 中 | 极致显存优化，需编译环境 |
 
 ### Top-P 参数配置
 | 原 topk | 实际 topk | P 阈值 | 温度 | 能量补偿 |
@@ -74,16 +74,16 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
   --cfg-options model.backbone.use_topp_flash=False model.backbone.use_pruned_kv_gather=True model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
 
-3. `torch_block` 模式：分块循环计算，显存减少，推理速度稍微变慢。
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=torch_block model.backbone.topp_flash_block_windows=16 model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
-```
-
-4. `cuda` 模式：自定义 CUDA 后端，显存最低，但依赖服务器具备可用的 CUDA 编译环境。
+3. `cuda` 模式：自定义 CUDA 后端，显存最低，但依赖服务器具备可用的 CUDA 编译环境。
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=cuda model.backbone.topp_flash_block_windows=16 model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
+```
+
+4. `kv_gather + fast` 模式：在 kv_gather 基础上启用 Top-P 剪枝前移，减少无效 gather 和 matmul，速度更快。
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --cfg-options model.backbone.use_topp_flash=False model.backbone.use_fast_attention=True model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
 
 ### 测试方法
@@ -116,19 +116,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   model.backbone.attn_vis_config.enabled=False
 ```
 
-3. `torch_block` 模式（分块循环计算，显存和速度均衡）：
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
-  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --cfg-options model.backbone.use_topp_flash=True \
-  model.backbone.topp_flash_backend=torch_block \
-  model.backbone.topp_flash_block_windows=16 \
-  model.backbone.feature_vis_config.enabled=False \
-  model.backbone.attn_vis_config.enabled=False
-```
-
-4. `cuda` 模式（自定义 CUDA 后端，显存最低）：
+3. `cuda` 模式（自定义 CUDA 后端，显存最低）：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
@@ -139,7 +127,18 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   model.backbone.attn_vis_config.enabled=False
 ```
 
-如果需要强制确认 CUDA 后端没有静默回退到 `torch_block`，测试前设置：
+4. `kv_gather + fast` 模式（Top-P 剪枝前移，速度最快）：
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
+  --cfg-options model.backbone.use_topp_flash=False \
+  model.backbone.use_fast_attention=True \
+  model.backbone.feature_vis_config.enabled=False \
+  model.backbone.attn_vis_config.enabled=False
+```
+
+如果需要强制确认 CUDA 后端可用（不可用则报错），测试前设置：
 ```bash
 export PVSA_TOPP_FLASH_STRICT_CUDA=1
 ```
