@@ -59,8 +59,9 @@ pip install -r requirements/runtime.txt
 
 ### 训练
 
+五种注意力后端对应的训练命令如下。
 
-四种注意力后端对应的训练命令如下。
+#### A. 不使用 Top-P Flash Attention（`use_topp_flash=False`）
 
 1. `kv_gather` 模式：原始注意力路径，速度较快，但最占显存。
 ```bash
@@ -74,11 +75,13 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
   --cfg-options model.backbone.use_topp_flash=False model.backbone.use_pruned_kv_gather=True model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
 
-3. `cuda` 模式：自定义 CUDA 后端，显存最低，但依赖服务器具备可用的 CUDA 编译环境。
+3. `kv_gather + fast` 模式：在 kv_gather 基础上启用 Top-P 剪枝前移，减少无效 gather 和 matmul，速度更快。
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=cuda model.backbone.topp_flash_block_windows=16 model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
+  --cfg-options model.backbone.use_topp_flash=False model.backbone.use_fast_attention=True model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
+
+#### B. 使用 Top-P Flash Attention（`use_topp_flash=True`）
 
 4. `torch_block` 模式：PyTorch 分块实现，速度最快，无需编译 CUDA 扩展。
 ```bash
@@ -86,10 +89,10 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
   --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=torch_block model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
 
-5. `kv_gather + fast` 模式：在 kv_gather 基础上启用 Top-P 剪枝前移，减少无效 gather 和 matmul，速度更快。
+5. `cuda` 模式：自定义 CUDA 后端，显存最低，但依赖服务器具备可用的 CUDA 编译环境。
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --cfg-options model.backbone.use_topp_flash=False model.backbone.use_fast_attention=True model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
+  --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=cuda model.backbone.topp_flash_block_windows=16 model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
 
 ### 测试方法
@@ -100,6 +103,8 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
 > export PYTHONPATH=/path/to/PVSA-Net:$PYTHONPATH
 > ```
 > 或者一次性重新注册当前路径：`pip install -e . --force-reinstall --no-deps`
+
+#### A. 不使用 Top-P Flash Attention（`use_topp_flash=False`）
 
 1. `kv_gather` 模式（原始注意力路径）：
 ```bash
@@ -122,16 +127,18 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   model.backbone.attn_vis_config.enabled=False
 ```
 
-3. `cuda` 模式（自定义 CUDA 后端，显存最低）：
+3. `kv_gather + fast` 模式（Top-P 剪枝前移，速度最快）：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --cfg-options model.backbone.use_topp_flash=True \
-  model.backbone.topp_flash_backend=cuda \
+  --cfg-options model.backbone.use_topp_flash=False \
+  model.backbone.use_fast_attention=True \
   model.backbone.feature_vis_config.enabled=False \
   model.backbone.attn_vis_config.enabled=False
 ```
+
+#### B. 使用 Top-P Flash Attention（`use_topp_flash=True`）
 
 4. `torch_block` 模式（PyTorch 分块实现，速度最快）：
 ```bash
@@ -144,13 +151,13 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   model.backbone.attn_vis_config.enabled=False
 ```
 
-5. `kv_gather + fast` 模式（Top-P 剪枝前移，速度最快）：
+5. `cuda` 模式（自定义 CUDA 后端，显存最低）：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --cfg-options model.backbone.use_topp_flash=False \
-  model.backbone.use_fast_attention=True \
+  --cfg-options model.backbone.use_topp_flash=True \
+  model.backbone.topp_flash_backend=cuda \
   model.backbone.feature_vis_config.enabled=False \
   model.backbone.attn_vis_config.enabled=False
 ```
