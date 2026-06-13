@@ -80,7 +80,13 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
   --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=cuda model.backbone.topp_flash_block_windows=16 model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
 ```
 
-4. `kv_gather + fast` 模式：在 kv_gather 基础上启用 Top-P 剪枝前移，减少无效 gather 和 matmul，速度更快。
+4. `torch_block` 模式：PyTorch 分块实现，速度最快，无需编译 CUDA 扩展。
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  --cfg-options model.backbone.use_topp_flash=True model.backbone.topp_flash_backend=torch_block model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
+```
+
+5. `kv_gather + fast` 模式：在 kv_gather 基础上启用 Top-P 剪枝前移，减少无效 gather 和 matmul，速度更快。
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options model.backbone.use_topp_flash=False model.backbone.use_fast_attention=True model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=4
@@ -127,7 +133,18 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   model.backbone.attn_vis_config.enabled=False
 ```
 
-4. `kv_gather + fast` 模式（Top-P 剪枝前移，速度最快）：
+4. `torch_block` 模式（PyTorch 分块实现，速度最快）：
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
+  --cfg-options model.backbone.use_topp_flash=True \
+  model.backbone.topp_flash_backend=torch_block \
+  model.backbone.feature_vis_config.enabled=False \
+  model.backbone.attn_vis_config.enabled=False
+```
+
+5. `kv_gather + fast` 模式（Top-P 剪枝前移，速度最快）：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \

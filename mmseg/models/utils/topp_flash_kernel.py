@@ -17,19 +17,22 @@ from torch.utils.cpp_extension import CUDA_HOME, load
 
 
 _CUDA_BACKENDS = {'cuda', 'cuda_forward'}
+_TORCH_BACKENDS = {'torch', 'torch_block', 'block'}
 _CUDA_EXTENSION = None
 _CUDA_EXTENSION_ERROR = None
 _CUDA_FALLBACK_WARNED = False
 
 
 def _normalize_backend(backend: Optional[str] = None) -> str:
-    backend = backend or os.getenv('PVSA_TOPP_FLASH_BACKEND', 'cuda')
+    backend = backend or os.getenv('PVSA_TOPP_FLASH_BACKEND', 'torch_block')
     return backend.strip().lower()
 
 
 def is_topp_flash_available(backend: Optional[str] = None) -> bool:
     """Return whether the requested optional backend is available."""
     backend = _normalize_backend(backend)
+    if backend in _TORCH_BACKENDS:
+        return True
     if backend in _CUDA_BACKENDS:
         return _can_build_cuda_extension()
     return False
@@ -98,31 +101,94 @@ def topp_flash_attention(q_pix: Tensor,
                          W: int,
                          block_windows: int = 64,
                          backend: Optional[str] = None) -> Tensor:
-    """Compute routed attention via CUDA kernel only."""
+    """Compute routed attention via CUDA kernel or torch_block backend."""
     backend = _normalize_backend(backend)
-    if backend not in _CUDA_BACKENDS:
-        raise RuntimeError(
-            f'topp flash backend {backend!r} is unavailable. '
-            f'Only CUDA backends are supported: {_CUDA_BACKENDS}')
-    if _can_run_cuda_forward(q_pix, kv_pix, r_weight, r_idx, r_mask):
-        try:
-            return _ToppCudaForwardFunction.apply(
-                q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads,
-                qk_dim, dim, float(scale), n_win, H, W,
-                int(block_windows))
-        except Exception as exc:
-            if _strict_cuda_backend():
-                raise
-            _warn_cuda_fallback(str(exc))
-    if _strict_cuda_backend():
-        raise RuntimeError(
-            'PVSA CUDA backend is requested but cannot run with the '
-            'current device, dtype, or build environment.')
+    if backend in _TORCH_BACKENDS:
+        return _ToppBlockAttentionFunction.apply(
+            q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim, dim,
+            float(scale), n_win, H, W, int(block_windows))
+    if backend in _CUDA_BACKENDS:
+        if _can_run_cuda_forward(q_pix, kv_pix, r_weight, r_idx, r_mask):
+            try:
+                return _ToppCudaForwardFunction.apply(
+                    q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads,
+                    qk_dim, dim, float(scale), n_win, H, W,
+                    int(block_windows))
+            except Exception as exc:
+                if _strict_cuda_backend():
+                    raise
+                _warn_cuda_fallback(str(exc))
+        if _strict_cuda_backend():
+            raise RuntimeError(
+                'PVSA CUDA backend is requested but cannot run with the '
+                'current device, dtype, or build environment.')
+        else:
+            _warn_cuda_fallback()
+        return _ToppBlockAttentionFunction.apply(
+            q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim, dim,
+            float(scale), n_win, H, W, int(block_windows))
     else:
-        _warn_cuda_fallback()
-    raise RuntimeError(
-        'PVSA CUDA topp attention kernel is unavailable and no fallback '
-        'backend is configured.')
+        raise RuntimeError(
+            f'topp flash backend {backend!r} is unavailable in this build.')
+
+
+class _ToppBlockAttentionFunction(torch.autograd.Function):
+    """Autograd wrapper that recomputes the block attention in backward."""
+
+    @staticmethod
+    def forward(ctx, q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
+                r_idx: Tensor, r_mask: Tensor, num_heads: int, qk_dim: int,
+                dim: int, scale: float, n_win: int, H: int, W: int,
+                block_windows: int) -> Tensor:
+        q_pix = q_pix.contiguous()
+        kv_pix = kv_pix.contiguous()
+        r_weight = r_weight.contiguous()
+        r_idx = r_idx.contiguous()
+        r_mask = r_mask.contiguous().bool()
+        keep_len = r_mask.sum(dim=-1).contiguous().long()
+        ctx.save_for_backward(q_pix, kv_pix, r_weight, r_idx, r_mask)
+        ctx.params = (num_heads, qk_dim, dim, scale, n_win, H, W,
+                      block_windows, keep_len)
+        with torch.no_grad():
+            return _topp_attention_block_impl(
+                q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim,
+                dim, scale, n_win, H, W, block_windows, keep_len)
+
+    @staticmethod
+    def backward(ctx, grad_out: Tensor) -> Tuple[Optional[Tensor], ...]:
+        q_pix, kv_pix, r_weight, r_idx, r_mask = ctx.saved_tensors
+        num_heads, qk_dim, dim, scale, n_win, H, W, block_windows, keep_len = ctx.params
+
+        needs = ctx.needs_input_grad
+        with torch.enable_grad():
+            q = q_pix.detach().requires_grad_(needs[0])
+            kv = kv_pix.detach().requires_grad_(needs[1])
+            rw = r_weight.detach().requires_grad_(needs[2])
+            out = _topp_attention_block_impl(
+                q, kv, rw, r_idx, r_mask, num_heads, qk_dim, dim, scale,
+                n_win, H, W, block_windows, keep_len)
+
+        targets = []
+        positions = []
+        if needs[0]:
+            targets.append(q)
+            positions.append(0)
+        if needs[1]:
+            targets.append(kv)
+            positions.append(1)
+        if needs[2]:
+            targets.append(rw)
+            positions.append(2)
+
+        grads = [None, None, None]
+        if targets:
+            computed = torch.autograd.grad(
+                out, targets, grad_out.contiguous(), allow_unused=True)
+            for pos, grad in zip(positions, computed):
+                grads[pos] = grad
+
+        return (grads[0], grads[1], grads[2], None, None, None, None, None,
+                None, None, None, None, None)
 
 
 class _ToppCudaForwardFunction(torch.autograd.Function):
@@ -182,6 +248,86 @@ class _ToppCudaForwardFunction(torch.autograd.Function):
 
         return (grads[0], grads[1], grads[2], None, None, None, None, None,
                 None, None, None, None, None)
+
+
+def _topp_attention_block_impl(q_pix: Tensor,
+                               kv_pix: Tensor,
+                               r_weight: Tensor,
+                               r_idx: Tensor,
+                               r_mask: Tensor,
+                               num_heads: int,
+                               qk_dim: int,
+                               dim: int,
+                               scale: float,
+                               n_win: int,
+                               H: int,
+                               W: int,
+                               block_windows: int = 64,
+                               keep_len: Optional[Tensor] = None) -> Tensor:
+    _validate_inputs(q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads,
+                     qk_dim, dim, n_win, H, W)
+    n, p2, q_len, _ = q_pix.shape
+    _, _, kv_len, c_kv = kv_pix.shape
+    topk = r_idx.size(-1)
+    head_q = qk_dim // num_heads
+    head_v = dim // num_heads
+    flat_size = n * p2
+    block_windows = flat_size if block_windows <= 0 else min(block_windows,
+                                                             flat_size)
+
+    if keep_len is None:
+        keep_len = r_mask.sum(dim=-1).long()
+    keep_flat = keep_len.reshape(flat_size)
+
+    q_flat = q_pix.reshape(flat_size, q_len, qk_dim)
+    idx_flat = r_idx.reshape(flat_size, topk).long()
+    weight_flat = r_weight.reshape(flat_size, topk).to(kv_pix.dtype)
+    flat_out = []
+
+    for start in range(0, flat_size, block_windows):
+        end = min(start + block_windows, flat_size)
+        batch = end - start
+        flat_ids = torch.arange(start, end, device=q_pix.device)
+        n_ids = torch.div(flat_ids, p2, rounding_mode='floor')
+
+        kv_batch = kv_pix.index_select(0, n_ids)
+        keep = keep_flat[start:end]
+        max_keep = int(keep.max().item())
+        if max_keep <= 0:
+            flat_out.append(torch.zeros(batch, q_len, dim, device=q_pix.device, dtype=kv_pix.dtype))
+            continue
+        max_keep = min(max_keep, topk)
+
+        idx = idx_flat[start:end, :max_keep]
+        weight = weight_flat[start:end, :max_keep]
+        kv_sel = torch.gather(
+            kv_batch,
+            dim=1,
+            index=idx.view(batch, max_keep, 1, 1).expand(
+                -1, -1, kv_len, c_kv))
+        kv_sel = weight.view(batch, max_keep, 1, 1) * kv_sel
+        k_sel, v_sel = kv_sel.split([qk_dim, dim], dim=-1)
+
+        k_sel = k_sel.view(batch, max_keep, kv_len, num_heads,
+                           head_q).permute(0, 3, 4, 1, 2).reshape(
+                               batch, num_heads, head_q, max_keep * kv_len)
+        v_sel = v_sel.view(batch, max_keep, kv_len, num_heads,
+                           head_v).permute(0, 3, 1, 2, 4).reshape(
+                               batch, num_heads, max_keep * kv_len, head_v)
+        q = q_flat[start:end].view(batch, q_len, num_heads,
+                                   head_q).permute(0, 2, 1, 3)
+
+        scores = (q * scale) @ k_sel
+        pos = torch.arange(max_keep, device=q_pix.device)
+        valid_mask = pos[None, :] < keep[:, None]
+        route_mask = valid_mask[:, :, None].expand(-1, -1, kv_len).reshape(batch, 1, 1, max_keep * kv_len)
+        scores = scores.masked_fill(~route_mask, torch.finfo(scores.dtype).min)
+        attn = torch.softmax(scores, dim=-1)
+        out = attn @ v_sel
+        flat_out.append(out.permute(0, 2, 1, 3).reshape(batch, q_len, dim))
+
+    flat_out = torch.cat(flat_out, dim=0)
+    return _unflatten_windows(flat_out, n, n_win, H, W, dim)
 
 
 def _unflatten_windows(flat_out: Tensor, n: int, n_win: int, H: int, W: int,
@@ -255,7 +401,7 @@ def _warn_cuda_fallback(reason: Optional[str] = None) -> None:
         return
     message = (
         'PVSA CUDA topp attention kernel is unavailable; fallback to '
-        'PVSA CUDA topp attention kernel is unavailable.')
+        'torch_block backend.')
     if reason:
         message = f'{message} Reason: {reason}'
     warnings.warn(message)
