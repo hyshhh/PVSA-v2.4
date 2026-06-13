@@ -88,7 +88,7 @@ def main():
         model.eval()
 
         # the first several iterations may be very slow so skip them
-        num_warmup = 5
+        num_warmup = min(5, max(0, len(data_loader) - 1))
         pure_inf_time = 0
         total_iters = max(200, len(data_loader))
         i = -1
