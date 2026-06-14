@@ -109,7 +109,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
 
 > **前提**：确保 Python 加载的是本项目代码，而非旧版 mmseg。如果之前在其他路径安装过 mmseg（`pip install -e .`），需要在每次运行前设置 `PYTHONPATH`：
 > ```bash
-> export PYTHONPATH=/path/to/PVSA-Net:$PYTHONPATH
+> export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v1:$PYTHONPATH
 > ```
 > 或者一次性重新注册当前路径：`pip install -e . --force-reinstall --no-deps`
 
