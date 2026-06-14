@@ -25,8 +25,8 @@ __device__ __forceinline__ float warp_reduce_sum(float val) {
 }
 
 // ============================================================================
-// 优化 kernel v2：每个线程处理一个 (coarse, head, q_pos)，独立计算完整 Q*K
-// 优势：无 warp shuffle 开销，适合 head_q <= 32 的场景
+// 优化 kernel：每个 warp 算一个 (coarse, head, q_pos)
+// 保持 warp 协作，但减少在线 softmax 更新频率
 // ============================================================================
 template <typename scalar_t>
 __global__ void topp_flash_kernel(
@@ -48,15 +48,16 @@ __global__ void topp_flash_kernel(
     int64_t coarse_total) {
   
   // Grid: (coarse_total * num_heads * q_len,)
-  // Block: (256,)
-  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int total_tasks = coarse_total * num_heads * q_len;
+  // Block: (256,) = 8 warps
+  const int global_warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+  const int lane = threadIdx.x % WARP_SIZE;
+  const int total_warps = coarse_total * num_heads * q_len;
   
-  if (tid >= total_tasks) return;
+  if (global_warp_id >= total_warps) return;
   
-  // 解析 (coarse, head, q_pos)
-  const int64_t coarse = tid / (num_heads * q_len);
-  const int rem = tid % (num_heads * q_len);
+  // 解析 warp 负责的 (coarse, head, q_pos)
+  const int64_t coarse = global_warp_id / (num_heads * q_len);
+  const int rem = global_warp_id % (num_heads * q_len);
   const int64_t head = rem / q_len;
   const int64_t q_pos = rem % q_len;
   
@@ -66,29 +67,35 @@ __global__ void topp_flash_kernel(
   const int64_t head_q = qk_dim / num_heads;
   const int64_t route_base = coarse * topk;
   
-  // 加载 Q 到寄存器
+  // 加载 Q 到寄存器（每个线程持有一部分）
   const int64_t q_base = ((batch * p2 + p) * q_len + q_pos) * qk_dim + head * head_q;
-  float q_local[32];  // 最多支持 head_q=32
-  for (int d = 0; d < head_q && d < 32; d++) {
-    q_local[d] = to_float(q_pix[q_base + d]);
+  float q_local[4];  // 每个线程负责 head_q/32 个元素
+  const int q_per_lane = (head_q + WARP_SIZE - 1) / WARP_SIZE;
+  for (int i = 0; i < q_per_lane; i++) {
+    int d = lane + i * WARP_SIZE;
+    q_local[i] = (d < head_q) ? to_float(q_pix[q_base + d]) : 0.0f;
   }
   
   // 有效 topk
   int64_t valid_topk = keep_len[coarse];
   if (valid_topk > topk) valid_topk = topk;
   
+  // 每个线程负责的 V 通道
+  const int v_per_lane = (head_v + WARP_SIZE - 1) / WARP_SIZE;
+  float o_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float m_prev = -INFINITY;
+  float l_prev = 0.0f;
+  
   if (valid_topk <= 0) {
-    for (int v_ch = 0; v_ch < head_v; v_ch++) {
-      int64_t out_idx = ((batch * p2 + p) * q_len + q_pos) * dim + head * head_v + v_ch;
-      out[out_idx] = 0.0f;
+    for (int i = 0; i < v_per_lane; i++) {
+      int v_ch = lane + i * WARP_SIZE;
+      if (v_ch < head_v) {
+        int64_t out_idx = ((batch * p2 + p) * q_len + q_pos) * dim + head * head_v + v_ch;
+        out[out_idx] = 0.0f;
+      }
     }
     return;
   }
-  
-  // 在线 softmax 状态
-  float o_acc[32] = {0.0f};  // 最多支持 head_v=32
-  float m_prev = -INFINITY;
-  float l_prev = 0.0f;
   
   // 遍历所有 KV 位置
   for (int64_t tk = 0; tk < valid_topk; tk++) {
@@ -98,34 +105,49 @@ __global__ void topp_flash_kernel(
     for (int64_t kv_pos = 0; kv_pos < kv_len; kv_pos++) {
       const int64_t kv_base = ((batch * p2 + kv_window) * kv_len + kv_pos) * (qk_dim + dim);
       
-      // 独立计算 Q*K（无 warp shuffle）
-      float score = 0.0f;
-      for (int d = 0; d < head_q && d < 32; d++) {
-        float k_val = to_float(kv_pix[kv_base + head * head_q + d]) * route_weight;
-        score += q_local[d] * k_val;
+      // warp 协作计算 Q*K（使用 warp shuffle reduce）
+      float partial_score = 0.0f;
+      for (int i = 0; i < q_per_lane; i++) {
+        int d = lane + i * WARP_SIZE;
+        if (d < head_q) {
+          float k_val = to_float(kv_pix[kv_base + head * head_q + d]) * route_weight;
+          partial_score += q_local[i] * k_val;
+        }
       }
-      score *= scale;
+      float score = warp_reduce_sum(partial_score) * scale;
       
-      // 在线 softmax
-      float m_new = fmaxf(m_prev, score);
-      float exp_prev = expf(m_prev - m_new);
-      float exp_new = expf(score - m_new);
-      l_prev = l_prev * exp_prev + exp_new;
+      // 在线 softmax（只在 lane 0 更新）
+      if (lane == 0) {
+        float m_new = fmaxf(m_prev, score);
+        float exp_prev = expf(m_prev - m_new);
+        float exp_new = expf(score - m_new);
+        l_prev = l_prev * exp_prev + exp_new;
+        m_prev = m_new;
+      }
+      // 广播新的 m_prev 和 l_prev 到所有 lane
+      m_prev = __shfl_sync(0xFFFFFFFF, m_prev, 0);
+      l_prev = __shfl_sync(0xFFFFFFFF, l_prev, 0);
       
       // 更新 V 通道
-      for (int v_ch = 0; v_ch < head_v && v_ch < 32; v_ch++) {
-        float v_val = to_float(kv_pix[kv_base + qk_dim + head * head_v + v_ch]) * route_weight;
-        o_acc[v_ch] = o_acc[v_ch] * exp_prev + exp_new * v_val;
+      float exp_score = expf(score - m_prev);
+      for (int i = 0; i < v_per_lane; i++) {
+        int v_ch = lane + i * WARP_SIZE;
+        float v_val = 0.0f;
+        if (v_ch < head_v) {
+          v_val = to_float(kv_pix[kv_base + qk_dim + head * head_v + v_ch]) * route_weight;
+        }
+        o_acc[i] = o_acc[i] + exp_score * v_val;
       }
-      
-      m_prev = m_new;
     }
   }
   
-  // 输出
-  for (int v_ch = 0; v_ch < head_v && v_ch < 32; v_ch++) {
-    int64_t out_idx = ((batch * p2 + p) * q_len + q_pos) * dim + head * head_v + v_ch;
-    out[out_idx] = o_acc[v_ch] / fmaxf(l_prev, 1e-20f);
+  // 输出（需要除以 l_prev）
+  for (int i = 0; i < v_per_lane; i++) {
+    int v_ch = lane + i * WARP_SIZE;
+    if (v_ch < head_v) {
+      int64_t out_idx = ((batch * p2 + p) * q_len + q_pos) * dim + head * head_v + v_ch;
+      out[out_idx] = o_acc[i] / fmaxf(l_prev, 1e-20f);
+    }
   }
 }
 
