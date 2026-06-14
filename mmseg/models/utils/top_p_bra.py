@@ -637,14 +637,16 @@ class ToppAttention(nn.Module):
                                head_v).permute(0, 3, 1, 2, 4)
 
             q = q * self.scale
-            mask = torch.zeros(q.size(0), 1, 1, group_max_keep,
-                               device=q.device, dtype=kv_pix.dtype)
-            mask.masked_fill_(
-                group_col[None, None, :] >= group_keep[:, None, None, :],
+            mask_group = torch.zeros(q.size(0), group_max_keep,
+                                     device=q.device, dtype=kv_pix.dtype)
+            mask_group.masked_fill_(
+                group_col >= group_keep[:, None],
                 float('-inf'))
-            attn = self.attn_act(
-                q @ k_sel.flatten(3) + mask.unsqueeze(-2))
-            out_chunk = attn @ v_sel.flatten(3)
+            mask = mask_group.unsqueeze(-1).expand(
+                -1, -1, kv_len).reshape(q.size(0), -1).unsqueeze(1).unsqueeze(1)
+            attn = self.attn_act(q @ k_sel.flatten(3) + mask)
+            out_chunk = attn @ v_sel.reshape(
+                -1, self.num_heads, group_max_keep * kv_len, head_v)
 
             out_flat.index_copy_(0, flat_ids, out_chunk)
 
