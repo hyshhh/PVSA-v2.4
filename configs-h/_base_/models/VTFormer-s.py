@@ -56,10 +56,9 @@ model = dict(
         topp_flash_backend='cuda',
         topp_flash_block_windows=16,
         use_pruned_kv_gather=False,
-        # pruned_kv_gather 分组数。按 keep_len 排序后等分为 N 组，
-        # 每组内 padding 到组内最大 keep_len，减少循环次数和 CPU-GPU 同步。
-        # 设为 1 等价于全局 padding（退化为 _attention_fast）；
-        # 设为 N（如 3）则循环 N 次，每次 padding 浪费更小。
+        # pruned_kv_gather 粗分桶数量。按 keep_len 范围切成 N 个桶，
+        # 例如 topk=8 且 N=2 时，桶范围为 1-4 和 5-8。
+        # 桶数越少，循环和索引开销越低；桶数越多，padding 浪费越小。
         pruned_kv_num_groups=3,
         use_fast_attention=False,
         # 特征图保存开关。训练默认关闭；打开后会把 FAM 前后和融合后的

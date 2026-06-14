@@ -597,7 +597,7 @@ class ToppAttention(nn.Module):
         topk = r_idx.size(-1)
         head_q = self.qk_dim // self.num_heads
         head_v = self.dim // self.num_heads
-        num_groups = self.pruned_kv_num_groups
+        num_groups = max(1, min(int(self.pruned_kv_num_groups), topk))
 
         keep_len = r_mask.sum(dim=-1).reshape(flat_size).long().clamp(min=1)
         q_flat = rearrange(q_pix, 'n p2 w2 (m c) -> (n p2) m w2 c',
@@ -606,16 +606,19 @@ class ToppAttention(nn.Module):
         weight_flat = r_weight.reshape(flat_size, topk).to(kv_pix.dtype)
         out_flat = q_flat.new_empty(flat_size, self.num_heads, q_len, head_v)
 
-        sorted_indices = torch.argsort(keep_len)
         col_indices = torch.arange(topk, device=q_pix.device)
 
-        for chunk in torch.chunk(sorted_indices, num_groups):
-            group_keep = keep_len[chunk]
-            group_max_keep = int(group_keep.max().item())
-            if group_max_keep == 0:
+        for group_idx in range(num_groups):
+            bucket_start = group_idx * topk // num_groups + 1
+            bucket_end = (group_idx + 1) * topk // num_groups
+            flat_ids = torch.nonzero(
+                (keep_len >= bucket_start) & (keep_len <= bucket_end),
+                as_tuple=False).flatten()
+            if flat_ids.numel() == 0:
                 continue
 
-            flat_ids = chunk
+            group_keep = keep_len.index_select(0, flat_ids)
+            group_max_keep = bucket_end
             n_ids = torch.div(flat_ids, p2, rounding_mode='floor')
             kept_b_idx = idx_flat.index_select(0, flat_ids)[:, :group_max_keep]
             q = q_flat.index_select(0, flat_ids)
