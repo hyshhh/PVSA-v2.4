@@ -43,6 +43,11 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.repeat_times <= 0:
+        raise ValueError('--repeat-times must be a positive integer')
+    if args.log_interval <= 0:
+        raise ValueError('--log-interval must be a positive integer')
+
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
@@ -72,13 +77,14 @@ def main():
         print(f'Run {time_index + 1}:')
         # build the dataloader
         data_loader = Runner.build_dataloader(cfg.test_dataloader)
+        if len(data_loader) == 0:
+            raise RuntimeError('The test dataloader is empty')
 
         # build the model and load checkpoint
         cfg.model.train_cfg = None
         model = MODELS.build(cfg.model)
 
-        if 'checkpoint' in args and osp.exists(args.checkpoint):
-            load_checkpoint(model, args.checkpoint, map_location='cpu')
+        load_checkpoint(model, args.checkpoint, map_location='cpu')
 
         if torch.cuda.is_available():
             model = model.cuda()
@@ -88,14 +94,20 @@ def main():
         model.eval()
 
         # the first several iterations may be very slow so skip them
-        num_warmup = min(5, max(0, len(data_loader) - 1))
         pure_inf_time = 0
         total_iters = max(200, len(data_loader))
-        i = -1
+        num_warmup = min(5, total_iters - 1)
+        data_iter = iter(data_loader)
 
         # benchmark with enough batches and take the average
-        for i, data in enumerate(data_loader):
-            data = model.data_preprocessor(data, True)
+        for i in range(total_iters):
+            try:
+                data = next(data_iter)
+            except StopIteration:
+                data_iter = iter(data_loader)
+                data = next(data_iter)
+
+            data = model.data_preprocessor(data, False)
             inputs = data['inputs']
             data_samples = data['data_samples']
             if torch.cuda.is_available():
@@ -116,17 +128,13 @@ def main():
                     print(f'Done image [{i + 1:<3}/ {total_iters}], '
                           f'fps: {fps:.2f} img / s')
 
-            if (i + 1) == total_iters:
-                break
-
-        effective_iters = min(i + 1, total_iters)
-        if effective_iters > num_warmup and pure_inf_time > 0:
-            fps = (effective_iters - num_warmup) / pure_inf_time
+        if total_iters > num_warmup and pure_inf_time > 0:
+            fps = (total_iters - num_warmup) / pure_inf_time
             print(f'Overall fps: {fps:.2f} img / s\n')
             benchmark_dict[f'overall_fps_{time_index + 1}'] = round(fps, 2)
             overall_fps_list.append(fps)
         else:
-            print(f'Warning: not enough iterations ({effective_iters}) '
+            print(f'Warning: not enough iterations ({total_iters}) '
                   f'to compute FPS (need > {num_warmup})')
     benchmark_dict['average_fps'] = round(np.mean(overall_fps_list), 2)
     benchmark_dict['fps_variance'] = round(np.var(overall_fps_list), 4)
