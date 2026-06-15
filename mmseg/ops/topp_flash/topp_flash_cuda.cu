@@ -14,6 +14,7 @@ constexpr int SPECIAL_N_WIN = 7;
 constexpr int SPECIAL_P2 = SPECIAL_N_WIN * SPECIAL_N_WIN;
 constexpr int SPECIAL_HEAD_DIM = 32;
 constexpr int SPECIAL_MAX_TOPK = 49;
+constexpr int SPECIAL_KV_TILE = 32;
 constexpr int GENERIC_MAX_ELEMS_PER_LANE = 16;
 
 __device__ __forceinline__ float to_float(float x) { return x; }
@@ -178,7 +179,7 @@ __global__ void topp_flash_kernel(
   }
 }
 
-// 专用路径：一个线程块处理同一窗口、同一头的一组查询点，并共享路由数据。
+// 专用路径：一个线程块处理同一窗口、同一头的一组查询点，并分块复用 K/V。
 template <typename scalar_t, int QUERY_TILE, int NUM_HEADS>
 __global__ void topp_flash_head32_nwin7_kernel(
     const scalar_t *__restrict__ q_pix,
@@ -200,6 +201,8 @@ __global__ void topp_flash_head32_nwin7_kernel(
   __shared__ int s_idx[SPECIAL_MAX_TOPK];
   __shared__ float s_weight[SPECIAL_MAX_TOPK];
   __shared__ int s_keep;
+  __shared__ float s_k[SPECIAL_KV_TILE * SPECIAL_HEAD_DIM];
+  __shared__ float s_v[SPECIAL_KV_TILE * SPECIAL_HEAD_DIM];
 
   const int warp_id = threadIdx.x / WARP_SIZE;
   const int lane = threadIdx.x % WARP_SIZE;
@@ -230,22 +233,23 @@ __global__ void topp_flash_head32_nwin7_kernel(
   __syncthreads();
 
   const int valid_topk = s_keep;
-  if (!q_valid) return;
-
   const int64_t q_h = height / SPECIAL_N_WIN;
   const int64_t q_w = width / SPECIAL_N_WIN;
   const int64_t win_y = p / SPECIAL_N_WIN;
   const int64_t win_x = p - win_y * SPECIAL_N_WIN;
-  const int64_t local_y = q_pos / q_w;
-  const int64_t local_x = q_pos - local_y * q_w;
+  const int64_t local_y = q_valid ? q_pos / q_w : 0;
+  const int64_t local_x = q_valid ? q_pos - local_y * q_w : 0;
   const int64_t out_h = win_y * q_h + local_y;
   const int64_t out_w = win_x * q_w + local_x;
   const int64_t out_c = head * SPECIAL_HEAD_DIM + lane;
 
-  const int64_t q_base =
-      ((batch * SPECIAL_P2 + p) * q_len + q_pos) * CHANNEL_DIM +
-      head * SPECIAL_HEAD_DIM;
-  const float q_val = to_float(q_pix[q_base + lane]);
+  float q_val = 0.0f;
+  if (q_valid) {
+    const int64_t q_base =
+        ((batch * SPECIAL_P2 + p) * q_len + q_pos) * CHANNEL_DIM +
+        head * SPECIAL_HEAD_DIM;
+    q_val = to_float(q_pix[q_base + lane]);
+  }
 
   float o_acc = 0.0f;
   float m_prev = -INFINITY;
@@ -255,33 +259,54 @@ __global__ void topp_flash_head32_nwin7_kernel(
     const int kv_window = s_idx[tk];
     const float route_weight = s_weight[tk];
 
-    for (int64_t kv_pos = 0; kv_pos < kv_len; kv_pos++) {
-      const int64_t kv_base =
-          ((batch * SPECIAL_P2 + kv_window) * kv_len + kv_pos) *
-          KV_CHANNEL_DIM;
+    for (int64_t kv_tile = 0; kv_tile < kv_len; kv_tile += SPECIAL_KV_TILE) {
+      const int64_t remaining = kv_len - kv_tile;
+      const int tile_len =
+          static_cast<int>(remaining < SPECIAL_KV_TILE
+                               ? remaining
+                               : SPECIAL_KV_TILE);
+      const int tile_elems = tile_len * SPECIAL_HEAD_DIM;
 
-      const float k_val =
-          to_float(kv_pix[kv_base + head * SPECIAL_HEAD_DIM + lane]) *
-          route_weight;
-      const float v_val =
-          to_float(kv_pix[kv_base + CHANNEL_DIM +
-                          head * SPECIAL_HEAD_DIM + lane]) *
-          route_weight;
-      const float partial_score = q_val * k_val;
-      const float score = warp_reduce_sum(partial_score) * scale;
-      const float m_new = fmaxf(m_prev, score);
-      const float old_scale = expf(m_prev - m_new);
-      const float cur_scale = expf(score - m_new);
+      for (int elem = threadIdx.x; elem < tile_elems; elem += blockDim.x) {
+        const int tile_pos = elem / SPECIAL_HEAD_DIM;
+        const int dim_pos = elem - tile_pos * SPECIAL_HEAD_DIM;
+        const int64_t kv_base =
+            ((batch * SPECIAL_P2 + kv_window) * kv_len +
+             (kv_tile + tile_pos)) *
+            KV_CHANNEL_DIM;
+        s_k[elem] =
+            to_float(kv_pix[kv_base + head * SPECIAL_HEAD_DIM + dim_pos]) *
+            route_weight;
+        s_v[elem] =
+            to_float(kv_pix[kv_base + CHANNEL_DIM +
+                            head * SPECIAL_HEAD_DIM + dim_pos]) *
+            route_weight;
+      }
+      __syncthreads();
 
-      l_prev = l_prev * old_scale + cur_scale;
-      o_acc = o_acc * old_scale + cur_scale * v_val;
-      m_prev = m_new;
+      if (q_valid) {
+        for (int tile_pos = 0; tile_pos < tile_len; tile_pos++) {
+          const int tile_base = tile_pos * SPECIAL_HEAD_DIM;
+          const float partial_score = q_val * s_k[tile_base + lane];
+          const float score = warp_reduce_sum(partial_score) * scale;
+          const float m_new = fmaxf(m_prev, score);
+          const float old_scale = expf(m_prev - m_new);
+          const float cur_scale = expf(score - m_new);
+
+          l_prev = l_prev * old_scale + cur_scale;
+          o_acc = o_acc * old_scale + cur_scale * s_v[tile_base + lane];
+          m_prev = m_new;
+        }
+      }
+      __syncthreads();
     }
   }
 
-  const int64_t out_idx =
-      nhwc_offset(batch, out_h, out_w, out_c, height, width, CHANNEL_DIM);
-  out[out_idx] = valid_topk > 0 ? o_acc / fmaxf(l_prev, 1e-20f) : 0.0f;
+  if (q_valid) {
+    const int64_t out_idx =
+        nhwc_offset(batch, out_h, out_w, out_c, height, width, CHANNEL_DIM);
+    out[out_idx] = valid_topk > 0 ? o_acc / fmaxf(l_prev, 1e-20f) : 0.0f;
+  }
 }
 
 template <typename scalar_t>

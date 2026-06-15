@@ -355,7 +355,8 @@ class ToppAttention(nn.Module):
                  topp_route_configs=None,
                  attn_vis_config=None,
                  use_fast_attention=False,
-                 debug_route=False):
+                 debug_route=False,
+                 topp_flash_debug=False):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -373,6 +374,7 @@ class ToppAttention(nn.Module):
         self.topp_route_configs = topp_route_configs
         self.attn_vis_config = attn_vis_config
         self.use_fast_attention = use_fast_attention
+        self.topp_flash_debug = topp_flash_debug
         self._topp_flash_warned = False
 
         ################side_dwconv (i.e. LCE in ShuntedTransformer)###########
@@ -523,7 +525,8 @@ class ToppAttention(nn.Module):
                 H=H,
                 W=W,
                 block_windows=self.topp_flash_block_windows,
-                backend=self.topp_flash_backend)
+                backend=self.topp_flash_backend,
+                debug=self.topp_flash_debug)
             out = out + lepe
             out = self.wo(out)
             if self.auto_pad and (pad_r > 0 or pad_b > 0):

@@ -58,6 +58,7 @@ model = dict(
         use_topp_flash=True,
         topp_flash_backend='cuda',
         topp_flash_block_windows=16,
+        topp_flash_debug=False,
         use_pruned_kv_gather=False,
         # pruned_kv_gather 粗分桶数量。按 keep_len 范围切成 N 个桶，
         # 例如 topk=8 且 N=2 时，桶范围为 1-4 和 5-8。

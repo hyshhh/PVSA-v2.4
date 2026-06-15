@@ -21,6 +21,8 @@ _TORCH_BACKENDS = {'torch', 'torch_block', 'block'}
 _CUDA_EXTENSION = None
 _CUDA_EXTENSION_ERROR = None
 _CUDA_FALLBACK_WARNED = False
+_CUDA_DEBUG_LOGGED = set()
+_CUDA_TIMING_LOGGED = set()
 
 
 def _normalize_backend(backend: Optional[str] = None) -> str:
@@ -100,21 +102,38 @@ def topp_flash_attention(q_pix: Tensor,
                          H: int,
                          W: int,
                          block_windows: int = 64,
-                         backend: Optional[str] = None) -> Tensor:
+                         backend: Optional[str] = None,
+                         debug: bool = False) -> Tensor:
     """Compute routed attention via CUDA kernel or torch_block backend."""
     backend = _normalize_backend(backend)
-    if backend in _TORCH_BACKENDS:
-        return _ToppBlockAttentionFunction.apply(
+    debug_key = None
+    debug_path = None
+    if debug:
+        debug_path, debug_key = _log_topp_flash_debug(
             q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim, dim,
-            float(scale), n_win, H, W, int(block_windows))
+            n_win, H, W, backend)
+    if backend in _TORCH_BACKENDS:
+        def run_torch_block():
+            return _ToppBlockAttentionFunction.apply(
+                q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads, qk_dim,
+                dim, float(scale), n_win, H, W, int(block_windows))
+
+        return _maybe_time_debug(debug, debug_key, debug_path, q_pix,
+                                 run_torch_block)
     if backend in _CUDA_BACKENDS:
         if _can_run_cuda_forward(q_pix, kv_pix, r_weight, r_idx, r_mask):
             try:
-                return _ToppCudaForwardFunction.apply(
-                    q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads,
-                    qk_dim, dim, float(scale), n_win, H, W,
-                    int(block_windows))
+                def run_cuda():
+                    return _ToppCudaForwardFunction.apply(
+                        q_pix, kv_pix, r_weight, r_idx, r_mask, num_heads,
+                        qk_dim, dim, float(scale), n_win, H, W,
+                        int(block_windows))
+
+                return _maybe_time_debug(debug, debug_key, debug_path, q_pix,
+                                         run_cuda)
             except Exception as exc:
+                if debug:
+                    print(f'[PVSA TopP Flash] CUDA fallback reason: {exc}')
                 if _strict_cuda_backend():
                     raise
                 _warn_cuda_fallback(str(exc))
@@ -130,6 +149,121 @@ def topp_flash_attention(q_pix: Tensor,
     else:
         raise RuntimeError(
             f'topp flash backend {backend!r} is unavailable in this build.')
+
+
+def _can_use_specialized_cuda_kernel(q_pix: Tensor, r_idx: Tensor,
+                                     num_heads: int, qk_dim: int, dim: int,
+                                     n_win: int, H: int, W: int) -> bool:
+    p2 = q_pix.size(1)
+    topk = r_idx.size(2)
+    if n_win != 7 or p2 != 49 or topk > 49:
+        return False
+    if H % 7 != 0 or W % 7 != 0:
+        return False
+    if num_heads not in (2, 4, 8, 16):
+        return False
+    if qk_dim != dim or qk_dim % num_heads != 0 or dim % num_heads != 0:
+        return False
+    return qk_dim // num_heads == 32 and dim // num_heads == 32
+
+
+def _specialized_cuda_reject_reasons(q_pix: Tensor, r_idx: Tensor,
+                                     num_heads: int, qk_dim: int, dim: int,
+                                     n_win: int, H: int, W: int) -> str:
+    reasons = []
+    p2 = q_pix.size(1)
+    topk = r_idx.size(2)
+    if n_win != 7:
+        reasons.append(f'n_win={n_win}')
+    if p2 != 49:
+        reasons.append(f'p2={p2}')
+    if topk > 49:
+        reasons.append(f'topk={topk}')
+    if H % 7 != 0 or W % 7 != 0:
+        reasons.append(f'HW={H}x{W}')
+    if num_heads not in (2, 4, 8, 16):
+        reasons.append(f'heads={num_heads}')
+    if qk_dim != dim:
+        reasons.append(f'qk_dim!=dim({qk_dim}!={dim})')
+    if qk_dim % num_heads != 0 or dim % num_heads != 0:
+        reasons.append('head_dim_divisible=False')
+    elif qk_dim // num_heads != 32 or dim // num_heads != 32:
+        reasons.append(
+            f'head_dim={qk_dim // num_heads}/{dim // num_heads}')
+    return ','.join(reasons) if reasons else 'none'
+
+
+def _log_topp_flash_debug(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
+                          r_idx: Tensor, r_mask: Tensor, num_heads: int,
+                          qk_dim: int, dim: int, n_win: int, H: int, W: int,
+                          backend: str) -> Tuple[str, tuple]:
+    can_build = _can_build_cuda_extension()
+    can_run = _can_run_cuda_forward(q_pix, kv_pix, r_weight, r_idx, r_mask)
+    specialized = (
+        backend in _CUDA_BACKENDS and can_run and
+        _can_use_specialized_cuda_kernel(q_pix, r_idx, num_heads, qk_dim,
+                                         dim, n_win, H, W))
+    if backend in _TORCH_BACKENDS:
+        path = 'torch_block'
+    elif specialized:
+        path = 'cuda_specialized'
+    elif can_run:
+        path = 'cuda_generic'
+    else:
+        path = 'fallback'
+
+    key = (
+        backend, path, str(q_pix.dtype), tuple(q_pix.shape),
+        tuple(kv_pix.shape), tuple(r_idx.shape), num_heads, qk_dim, dim,
+        n_win, H, W)
+    if key in _CUDA_DEBUG_LOGGED:
+        return path, key
+    _CUDA_DEBUG_LOGGED.add(key)
+
+    keep_len = r_mask.sum(dim=-1)
+    keep_min = int(keep_len.min().item()) if keep_len.numel() else 0
+    keep_max = int(keep_len.max().item()) if keep_len.numel() else 0
+    keep_mean = float(keep_len.float().mean().item()) if keep_len.numel() else 0.0
+    q_len = q_pix.size(2)
+    kv_len = kv_pix.size(2)
+    topk = r_idx.size(2)
+    reject = _specialized_cuda_reject_reasons(
+        q_pix, r_idx, num_heads, qk_dim, dim, n_win, H, W)
+    print(
+        '[PVSA TopP Flash] '
+        f'backend={backend} path={path} build={can_build} can_run={can_run} '
+        f'specialized={specialized} dtype={q_pix.dtype} '
+        f'q={tuple(q_pix.shape)} kv={tuple(kv_pix.shape)} '
+        f'route={tuple(r_idx.shape)} keep=min/mean/max '
+        f'{keep_min}/{keep_mean:.2f}/{keep_max} '
+        f'heads={num_heads} qk_dim={qk_dim} dim={dim} n_win={n_win} '
+        f'H={H} W={W} q_len={q_len} kv_len={kv_len} topk={topk} '
+        f'special_reject={reject}')
+    return path, key
+
+
+def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
+                      debug_path: Optional[str], timing_tensor: Tensor,
+                      runner):
+    if not debug or debug_key is None or debug_key in _CUDA_TIMING_LOGGED:
+        return runner()
+    if not torch.cuda.is_available() or not timing_tensor.is_cuda:
+        return runner()
+    _CUDA_TIMING_LOGGED.add(debug_key)
+    if debug_path in ('cuda_specialized', 'cuda_generic'):
+        _load_cuda_extension()
+    with torch.cuda.device(timing_tensor.device):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        out = runner()
+        end.record()
+        end.synchronize()
+        elapsed_ms = start.elapsed_time(end)
+    print(
+        '[PVSA TopP Flash] '
+        f'timing path={debug_path} elapsed_ms={elapsed_ms:.4f}')
+    return out
 
 
 class _ToppBlockAttentionFunction(torch.autograd.Function):
