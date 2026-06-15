@@ -1,4 +1,7 @@
 #include <torch/extension.h>
+#include <pybind11/stl.h>
+
+#include <vector>
 
 torch::Tensor topp_flash_forward_cuda(torch::Tensor q_pix,
                                       torch::Tensor kv_pix,
@@ -12,6 +15,13 @@ torch::Tensor topp_flash_forward_cuda(torch::Tensor q_pix,
                                       int64_t n_win,
                                       int64_t height,
                                       int64_t width);
+
+std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
+                                                   int64_t topk,
+                                                   double p,
+                                                   double temperature,
+                                                   double energy,
+                                                   double scale);
 
 torch::Tensor topp_flash_forward(torch::Tensor q_pix,
                                  torch::Tensor kv_pix,
@@ -51,6 +61,24 @@ torch::Tensor topp_flash_forward(torch::Tensor q_pix,
                                  num_heads, qk_dim, dim, scale, n_win, height, width);
 }
 
+std::vector<torch::Tensor> topp_route_forward(torch::Tensor query,
+                                             int64_t topk,
+                                             double p,
+                                             double temperature,
+                                             double energy,
+                                             double scale) {
+  TORCH_CHECK(query.is_cuda(), "query must be a CUDA tensor");
+  TORCH_CHECK(query.scalar_type() == torch::kFloat32,
+              "query must be float32");
+  TORCH_CHECK(query.dim() == 3, "query must be a 3D tensor");
+  TORCH_CHECK(query.size(1) == 49, "query p2 must be 49");
+  TORCH_CHECK(topk > 0 && topk <= 49, "topk must be in [1, 49]");
+  return topp_route_forward_cuda(query.contiguous(), topk, p, temperature,
+                                 energy, scale);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &topp_flash_forward, "PVSA topp flash forward (optimized)");
+  m.def("route_forward", &topp_route_forward,
+        "PVSA topp route forward (optimized)");
 }

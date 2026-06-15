@@ -6,6 +6,7 @@
 #include <torch/extension.h>
 
 #include <cstdint>
+#include <vector>
 
 constexpr int WARP_SIZE = 32;
 constexpr int WARPS_PER_BLOCK = 8;
@@ -16,6 +17,7 @@ constexpr int SPECIAL_HEAD_DIM = 32;
 constexpr int SPECIAL_MAX_TOPK = 49;
 constexpr int SPECIAL_KV_TILE = 32;
 constexpr int GENERIC_MAX_ELEMS_PER_LANE = 16;
+constexpr int ROUTE_THREADS = 128;
 
 __device__ __forceinline__ float to_float(float x) { return x; }
 __device__ __forceinline__ float to_float(__half x) { return __half2float(x); }
@@ -40,6 +42,118 @@ __device__ __forceinline__ int64_t nhwc_offset(int64_t batch,
                                                int64_t width,
                                                int64_t dim) {
   return ((batch * height + h) * width + w) * dim + c;
+}
+
+__global__ void topp_route_nwin7_kernel(
+    const float *__restrict__ query,
+    float *__restrict__ route_weight,
+    int64_t *__restrict__ route_idx,
+    bool *__restrict__ route_mask,
+    int64_t n,
+    int64_t qk_dim,
+    int64_t topk,
+    float p,
+    float temperature,
+    float energy,
+    float scale) {
+  __shared__ float s_scores[SPECIAL_P2];
+  __shared__ float s_q_norm_acc[ROUTE_THREADS];
+
+  const int row = blockIdx.x;
+  const int batch = row / SPECIAL_P2;
+  const int q_win = row - batch * SPECIAL_P2;
+  const int tid = threadIdx.x;
+  const int64_t q_base =
+      (static_cast<int64_t>(batch) * SPECIAL_P2 + q_win) * qk_dim;
+
+  float norm_acc = 0.0f;
+  for (int64_t d = tid; d < qk_dim; d += blockDim.x) {
+    const float qv = query[q_base + d];
+    norm_acc += qv * qv;
+  }
+  s_q_norm_acc[tid] = norm_acc;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      s_q_norm_acc[tid] += s_q_norm_acc[tid + stride];
+    }
+    __syncthreads();
+  }
+  const float q_inv_norm = rsqrtf(fmaxf(s_q_norm_acc[0], 1.0e-24f));
+
+  if (tid < SPECIAL_P2) {
+    const int k_win = tid;
+    const int64_t k_base =
+        (static_cast<int64_t>(batch) * SPECIAL_P2 + k_win) * qk_dim;
+    float dot = 0.0f;
+    float k_norm = 0.0f;
+    for (int64_t d = 0; d < qk_dim; d++) {
+      const float qv = query[q_base + d];
+      const float kv = query[k_base + d];
+      dot += qv * kv;
+      k_norm += kv * kv;
+    }
+    s_scores[k_win] =
+        dot * q_inv_norm * rsqrtf(fmaxf(k_norm, 1.0e-24f)) * scale;
+  }
+  __syncthreads();
+
+  if (tid == 0) {
+    float selected_scores[SPECIAL_MAX_TOPK];
+    int selected_idx[SPECIAL_MAX_TOPK];
+
+    for (int tk = 0; tk < topk; tk++) {
+      float best = -INFINITY;
+      int best_idx = 0;
+      for (int col = 0; col < SPECIAL_P2; col++) {
+        const float score = s_scores[col];
+        bool used = false;
+        for (int prev = 0; prev < tk; prev++) {
+          if (selected_idx[prev] == col) {
+            used = true;
+            break;
+          }
+        }
+        if (!used && (score > best || (score == best && col < best_idx))) {
+          best = score;
+          best_idx = col;
+        }
+      }
+      selected_scores[tk] = best;
+      selected_idx[tk] = best_idx;
+    }
+
+    float max_score = -INFINITY;
+    for (int tk = 0; tk < topk; tk++) {
+      max_score = fmaxf(max_score, selected_scores[tk] / temperature);
+    }
+    float denom = 0.0f;
+    for (int tk = 0; tk < topk; tk++) {
+      selected_scores[tk] = expf(selected_scores[tk] / temperature - max_score);
+      denom += selected_scores[tk];
+    }
+
+    float cumsum = 0.0f;
+    int keep_len = 0;
+    for (int tk = 0; tk < topk; tk++) {
+      const float prob = selected_scores[tk] / denom;
+      cumsum += prob;
+      if (cumsum <= p) {
+        keep_len++;
+      }
+      selected_scores[tk] = prob;
+    }
+    if (keep_len < 1) keep_len = 1;
+
+    const int64_t out_base = static_cast<int64_t>(row) * topk;
+    for (int tk = 0; tk < topk; tk++) {
+      const bool valid = tk < keep_len;
+      route_weight[out_base + tk] = valid ? selected_scores[tk] : 0.0f;
+      route_idx[out_base + tk] = valid ? selected_idx[tk] : 0;
+      route_mask[out_base + tk] = valid;
+    }
+  }
 }
 
 template <typename scalar_t>
@@ -542,4 +656,37 @@ torch::Tensor topp_flash_forward_cuda(torch::Tensor q_pix,
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
+}
+
+std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
+                                                   int64_t topk,
+                                                   double p,
+                                                   double temperature,
+                                                   double energy,
+                                                   double scale) {
+  TORCH_CHECK(query.scalar_type() == torch::kFloat32,
+              "route query must be float32");
+  TORCH_CHECK(query.size(1) == SPECIAL_P2, "route query p2 must be 49");
+  TORCH_CHECK(topk > 0 && topk <= SPECIAL_MAX_TOPK,
+              "route topk must be in [1, 49]");
+  const int64_t n = query.size(0);
+  const int64_t qk_dim = query.size(2);
+  auto route_weight = torch::empty({n, SPECIAL_P2, topk}, query.options());
+  auto route_idx = torch::empty(
+      {n, SPECIAL_P2, topk}, query.options().dtype(torch::kLong));
+  auto route_mask = torch::empty(
+      {n, SPECIAL_P2, topk}, query.options().dtype(torch::kBool));
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+  const int blocks = static_cast<int>(n * SPECIAL_P2);
+  topp_route_nwin7_kernel<<<blocks, ROUTE_THREADS, 0, stream>>>(
+      query.data_ptr<float>(),
+      route_weight.data_ptr<float>(),
+      route_idx.data_ptr<int64_t>(),
+      route_mask.data_ptr<bool>(),
+      n, qk_dim, topk, static_cast<float>(p),
+      static_cast<float>(temperature), static_cast<float>(energy),
+      static_cast<float>(scale));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {route_weight, route_idx, route_mask};
 }

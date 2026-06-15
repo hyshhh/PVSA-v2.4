@@ -11,7 +11,10 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from .topp_flash_kernel import is_topp_flash_available, topp_flash_attention
+from .topp_flash_kernel import (can_run_topp_route_cuda,
+                                is_topp_flash_available,
+                                topp_flash_attention, topp_route_cuda,
+                                warn_topp_route_cuda_fallback)
 
 
 DEFAULT_ATTN_VIS_CONFIG = dict(enabled=False)
@@ -207,6 +210,26 @@ class TopkRouting(nn.Module):
             if not self.diff_routing:
                 query = query.detach()
                 key = key.detach()
+            if (not self.attn_vis_config.get('enabled', False)
+                    and can_run_topp_route_cuda(query, self.topk)):
+                try:
+                    topk_score, topk_index, valid_mask = topp_route_cuda(
+                        query, self.topk, self.P, self.Temperature,
+                        self.energy, self.scale)
+                    max_len = valid_mask.sum(dim=-1, keepdim=True).max()
+                    topk_score = topk_score * max_len * self.energy
+                    if self.debug_route:
+                        keep_len = valid_mask.sum(dim=-1, keepdim=True)
+                        print(
+                            f'[Route] flag={self.route_flag} maxk={self.topk} '
+                            f'p={self.P} temp={self.Temperature} '
+                            f'energy={self.energy} '
+                            f'max_len={max_len.item()} '
+                            f'keep_len_min={keep_len.min().item():.0f} '
+                            f'keep_len_mean={keep_len.float().mean().item():.1f}')
+                    return topk_score, topk_index, valid_mask
+                except Exception as exc:
+                    warn_topp_route_cuda_fallback(str(exc))
             # 1️⃣ Linear embedding
             # q = self.emb(query)    # (n, p2, c)
             # k = self.emb(key)      # (n, p2, c)

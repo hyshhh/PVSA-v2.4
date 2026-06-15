@@ -23,6 +23,7 @@ _CUDA_EXTENSION_ERROR = None
 _CUDA_FALLBACK_WARNED = False
 _CUDA_DEBUG_LOGGED = set()
 _CUDA_TIMING_LOGGED = set()
+_ROUTE_CUDA_FALLBACK_WARNED = False
 
 
 def _normalize_backend(backend: Optional[str] = None) -> str:
@@ -38,6 +39,40 @@ def is_topp_flash_available(backend: Optional[str] = None) -> bool:
     if backend in _CUDA_BACKENDS:
         return _can_build_cuda_extension()
     return False
+
+
+def topp_route_cuda(query: Tensor,
+                    topk: int,
+                    p: float,
+                    temperature: float,
+                    energy: float,
+                    scale: float) -> Tuple[Tensor, Tensor, Tensor]:
+    """Fused CUDA inference route for fixed 7x7 windows."""
+    extension = _load_cuda_extension()
+    return tuple(extension.route_forward(
+        query.contiguous(), int(topk), float(p), float(temperature),
+        float(energy), float(scale)))
+
+
+def can_run_topp_route_cuda(query: Tensor, topk: int) -> bool:
+    if os.getenv('PVSA_TOPP_ROUTE_CUDA', '1') != '1':
+        return False
+    if not _can_build_cuda_extension():
+        return False
+    if query.requires_grad:
+        return False
+    return (query.is_cuda and query.dtype == torch.float32 and
+            query.dim() == 3 and query.size(1) == 49 and
+            0 < int(topk) <= 49)
+
+
+def warn_topp_route_cuda_fallback(reason: str) -> None:
+    global _ROUTE_CUDA_FALLBACK_WARNED
+    if _ROUTE_CUDA_FALLBACK_WARNED:
+        return
+    warnings.warn(
+        f'topp route CUDA path failed; fallback to torch route. {reason}')
+    _ROUTE_CUDA_FALLBACK_WARNED = True
 
 
 def topp_attention_reference(q_pix: Tensor,
