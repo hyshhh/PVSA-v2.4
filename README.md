@@ -76,6 +76,9 @@ rm -rf ~/.cache/torch_extensions/py*/pvsa_topp_flash_cuda
 推理命令：
 
 ```bash
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-V2.2:$PYTHONPATH
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
