@@ -46,20 +46,24 @@ def _time_cuda_stage(enabled: bool, tensor: Tensor, fn):
         return out, start.elapsed_time(end)
 
 
+def _profile_topp_stage() -> bool:
+    return os.getenv('PVSA_TOPP_STAGE_PROFILE', '0') == '1'
+
+
 def _log_topp_stage_debug(path: str, x: Tensor, q_pix: Tensor, kv_pix: Tensor,
                           r_idx: Tensor, times: Dict[str, float],
                           num_heads: int, qk_dim: int, dim: int,
                           n_win: int) -> None:
-    if not times:
-        return
     key = (
         path, tuple(x.shape), tuple(q_pix.shape), tuple(kv_pix.shape),
         tuple(r_idx.shape), num_heads, qk_dim, dim, n_win)
     if key in _TOPP_FLASH_STAGE_LOGGED:
         return
     _TOPP_FLASH_STAGE_LOGGED.add(key)
-    parts = ' '.join(
-        f'{name}={elapsed:.4f}ms' for name, elapsed in times.items())
+    parts = (
+        ' '.join(f'{name}={elapsed:.4f}ms'
+                 for name, elapsed in times.items())
+        if times else 'timing=off')
     print(
         '[PVSA TopP Stage] '
         f'path={path} x={tuple(x.shape)} q={tuple(q_pix.shape)} '
@@ -514,10 +518,11 @@ class ToppAttention(nn.Module):
             assert H % self.n_win == 0 and W % self.n_win == 0  #
         ###################################################
         stage_debug = self.topp_flash_debug and not ret_attn_mask
+        stage_profile = stage_debug and _profile_topp_stage()
         stage_times = {}
 
         def run_stage(name, fn):
-            out, elapsed = _time_cuda_stage(stage_debug, x, fn)
+            out, elapsed = _time_cuda_stage(stage_profile, x, fn)
             if elapsed is not None:
                 stage_times[name] = elapsed
             return out
@@ -580,9 +585,12 @@ class ToppAttention(nn.Module):
                 backend=self.topp_flash_backend,
                 debug=self.topp_flash_debug)
             out = out + lepe
-            out = self.wo(out)
+            out = run_stage('wo', lambda: self.wo(out))
             if self.auto_pad and (pad_r > 0 or pad_b > 0):
                 out = out[:, :H_in, :W_in, :].contiguous()
+            _log_topp_stage_debug(
+                'topp_flash', x, q_pix, kv_pix, r_idx, stage_times,
+                self.num_heads, self.qk_dim, self.dim, self.n_win)
             return out
 
         if self.use_topp_flash and not self._topp_flash_warned:

@@ -245,7 +245,8 @@ def _log_topp_flash_debug(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
 def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
                       debug_path: Optional[str], timing_tensor: Tensor,
                       runner):
-    if not debug or debug_key is None or debug_key in _CUDA_TIMING_LOGGED:
+    if (not debug or not _profile_topp_flash() or debug_key is None or
+            debug_key in _CUDA_TIMING_LOGGED):
         return runner()
     if not torch.cuda.is_available() or not timing_tensor.is_cuda:
         return runner()
@@ -272,6 +273,10 @@ def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
         f'timing path={debug_path} elapsed_ms={elapsed_ms:.4f} '
         f'warmup={warmup} repeat={repeat}')
     return out
+
+
+def _profile_topp_flash() -> bool:
+    return os.getenv('PVSA_TOPP_FLASH_PROFILE', '0') == '1'
 
 
 class _ToppBlockAttentionFunction(torch.autograd.Function):
