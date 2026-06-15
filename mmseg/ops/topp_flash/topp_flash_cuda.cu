@@ -542,7 +542,6 @@ __global__ void topp_fused_route_flash_head32_nwin7_kernel(
     const float *__restrict__ route_query,
     const float *__restrict__ q_pix,
     const float *__restrict__ kv_pix,
-    const int *__restrict__ max_keep,
     float *__restrict__ out,
     int64_t n,
     int64_t q_len,
@@ -550,7 +549,6 @@ __global__ void topp_fused_route_flash_head32_nwin7_kernel(
     int64_t topk,
     float route_p,
     float route_temperature,
-    float route_energy,
     float route_scale,
     float attn_scale,
     int64_t height,
@@ -657,12 +655,11 @@ __global__ void topp_fused_route_flash_head32_nwin7_kernel(
       selected_scores[tk] = prob;
     }
     if (keep_len < 1) keep_len = 1;
-    const float route_mul = static_cast<float>(max_keep[0]) * route_energy;
     s_keep = keep_len;
     for (int tk = 0; tk < topk; tk++) {
       const bool valid = tk < keep_len;
       s_idx[tk] = valid ? selected_idx[tk] : 0;
-      s_weight[tk] = valid ? selected_scores[tk] * route_mul : 0.0f;
+      s_weight[tk] = valid ? selected_scores[tk] : 0.0f;
     }
   }
   __syncthreads();
@@ -899,12 +896,10 @@ template <int NUM_HEADS>
 void launch_fused_route_flash(torch::Tensor route_query,
                               torch::Tensor q_pix,
                               torch::Tensor kv_pix,
-                              torch::Tensor max_keep,
                               torch::Tensor out,
                               int64_t topk,
                               float route_p,
                               float route_temperature,
-                              float route_energy,
                               float route_scale,
                               float attn_scale,
                               int64_t height,
@@ -920,22 +915,19 @@ void launch_fused_route_flash(torch::Tensor route_query,
           route_query.data_ptr<float>(),
           q_pix.data_ptr<float>(),
           kv_pix.data_ptr<float>(),
-          max_keep.data_ptr<int>(),
           out.data_ptr<float>(),
-          n, q_len, kv_len, topk, route_p, route_temperature, route_energy,
-          route_scale, attn_scale, height, width);
+          n, q_len, kv_len, topk, route_p, route_temperature, route_scale,
+          attn_scale, height, width);
 }
 
 void dispatch_fused_route_flash(torch::Tensor route_query,
                                 torch::Tensor q_pix,
                                 torch::Tensor kv_pix,
-                                torch::Tensor max_keep,
                                 torch::Tensor out,
                                 int64_t topk,
                                 int64_t num_heads,
                                 float route_p,
                                 float route_temperature,
-                                float route_energy,
                                 float route_scale,
                                 float attn_scale,
                                 int64_t height,
@@ -943,24 +935,20 @@ void dispatch_fused_route_flash(torch::Tensor route_query,
                                 cudaStream_t stream) {
   if (num_heads == 2) {
     launch_fused_route_flash<2>(
-        route_query, q_pix, kv_pix, max_keep, out, topk, route_p,
-        route_temperature, route_energy, route_scale, attn_scale, height,
-        width, stream);
+        route_query, q_pix, kv_pix, out, topk, route_p, route_temperature,
+        route_scale, attn_scale, height, width, stream);
   } else if (num_heads == 4) {
     launch_fused_route_flash<4>(
-        route_query, q_pix, kv_pix, max_keep, out, topk, route_p,
-        route_temperature, route_energy, route_scale, attn_scale, height,
-        width, stream);
+        route_query, q_pix, kv_pix, out, topk, route_p, route_temperature,
+        route_scale, attn_scale, height, width, stream);
   } else if (num_heads == 8) {
     launch_fused_route_flash<8>(
-        route_query, q_pix, kv_pix, max_keep, out, topk, route_p,
-        route_temperature, route_energy, route_scale, attn_scale, height,
-        width, stream);
+        route_query, q_pix, kv_pix, out, topk, route_p, route_temperature,
+        route_scale, attn_scale, height, width, stream);
   } else {
     launch_fused_route_flash<16>(
-        route_query, q_pix, kv_pix, max_keep, out, topk, route_p,
-        route_temperature, route_energy, route_scale, attn_scale, height,
-        width, stream);
+        route_query, q_pix, kv_pix, out, topk, route_p, route_temperature,
+        route_scale, attn_scale, height, width, stream);
   }
 }
 
@@ -1059,7 +1047,6 @@ torch::Tensor topp_fused_route_flash_forward_cuda(torch::Tensor route_query,
                                                   int64_t topk,
                                                   double route_p,
                                                   double route_temperature,
-                                                  double route_energy,
                                                   double route_scale,
                                                   double attn_scale,
                                                   int64_t num_heads,
@@ -1100,21 +1087,13 @@ torch::Tensor topp_fused_route_flash_forward_cuda(torch::Tensor route_query,
 
   auto out = torch::empty({q_pix.size(0), height, width, dim},
                           q_pix.options().dtype(torch::kFloat32));
-  auto max_keep = torch::zeros({1}, q_pix.options().dtype(torch::kInt));
   auto stream = at::cuda::getCurrentCUDAStream();
-  const int route_blocks = static_cast<int>(q_pix.size(0) * SPECIAL_P2);
-
-  topp_route_max_keep_nwin7_kernel<<<route_blocks, ROUTE_THREADS, 0, stream>>>(
-      route_query.data_ptr<float>(),
-      max_keep.data_ptr<int>(),
-      route_query.size(0), qk_dim, topk, static_cast<float>(route_p),
-      static_cast<float>(route_temperature), static_cast<float>(route_scale));
 
   dispatch_fused_route_flash(
-      route_query, q_pix, kv_pix, max_keep, out, topk, num_heads,
+      route_query, q_pix, kv_pix, out, topk, num_heads,
       static_cast<float>(route_p), static_cast<float>(route_temperature),
-      static_cast<float>(route_energy), static_cast<float>(route_scale),
-      static_cast<float>(attn_scale), height, width, stream);
+      static_cast<float>(route_scale), static_cast<float>(attn_scale), height,
+      width, stream);
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;

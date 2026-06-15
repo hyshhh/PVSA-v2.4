@@ -12,11 +12,8 @@ from einops import rearrange
 from torch import Tensor
 
 from .topp_flash_kernel import (can_run_topp_fused_cuda,
-                                can_run_topp_route_cuda,
                                 is_topp_flash_available,
-                                topp_flash_attention,
-                                topp_flash_fused_attention, topp_route_cuda,
-                                warn_topp_route_cuda_fallback)
+                                topp_flash_fused_attention)
 
 
 DEFAULT_ATTN_VIS_CONFIG = dict(enabled=False)
@@ -213,24 +210,6 @@ class TopkRouting(nn.Module):
             if not self.diff_routing:
                 query = query.detach()
                 key = key.detach()
-            if (not self.attn_vis_config.get('enabled', False)
-                    and can_run_topp_route_cuda(query, self.topk)):
-                try:
-                    topk_score, topk_index, valid_mask = topp_route_cuda(
-                        query, self.topk, self.P, self.Temperature,
-                        self.energy, self.scale)
-                    if self.debug_route:
-                        keep_len = valid_mask.sum(dim=-1)
-                        print(
-                            f'[Route] flag={self.route_flag} maxk={self.topk} '
-                            f'p={self.P} temp={self.Temperature} '
-                            f'energy={self.energy} '
-                            f'max_len={keep_len.max().item()} '
-                            f'keep_len_min={keep_len.min().item():.0f} '
-                            f'keep_len_mean={keep_len.float().mean().item():.1f}')
-                    return topk_score, topk_index, valid_mask
-                except Exception as exc:
-                    warn_topp_route_cuda_fallback(str(exc))
             # 1️⃣ Linear embedding
             # q = self.emb(query)    # (n, p2, c)
             # k = self.emb(key)      # (n, p2, c)
@@ -613,7 +592,6 @@ class ToppAttention(nn.Module):
                     topk=self.router.topk,
                     p=self.router.P,
                     temperature=self.router.Temperature,
-                    energy=self.router.energy,
                     route_scale=self.router.scale,
                     attn_scale=self.scale,
                     num_heads=self.num_heads,
@@ -638,39 +616,6 @@ class ToppAttention(nn.Module):
         r_weight, r_idx, r_mask = run_stage(
             'router',
             lambda: self.router(q_win, k_win,GA))  # all are (n, p^2, topk) tensors
-
-        if self.use_topp_flash and not ret_attn_mask and is_topp_flash_available(
-                self.topp_flash_backend):
-            out = topp_flash_attention(
-                q_pix=q_pix,
-                kv_pix=kv_pix,
-                r_weight=r_weight,
-                r_idx=r_idx,
-                r_mask=r_mask,
-                num_heads=self.num_heads,
-                qk_dim=self.qk_dim,
-                dim=self.dim,
-                scale=self.scale,
-                n_win=self.n_win,
-                H=H,
-                W=W,
-                block_windows=self.topp_flash_block_windows,
-                backend=self.topp_flash_backend,
-                debug=self.topp_flash_debug)
-            out = out + lepe
-            out = run_stage('wo', lambda: self.wo(out))
-            if self.auto_pad and (pad_r > 0 or pad_b > 0):
-                out = out[:, :H_in, :W_in, :].contiguous()
-            _log_topp_stage_debug(
-                'topp_flash', x, q_pix, kv_pix, r_idx, stage_times,
-                self.num_heads, self.qk_dim, self.dim, self.n_win)
-            return out
-
-        if self.use_topp_flash and not self._topp_flash_warned:
-            warnings.warn(
-                'topp flash attention kernel is unavailable; '
-                'fallback to the torch implementation.')
-            self._topp_flash_warned = True
 
         if self.use_pruned_kv_gather and not ret_attn_mask:
             out = self._attention_with_pruned_kv_gather(
