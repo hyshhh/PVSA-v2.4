@@ -7,6 +7,7 @@ torch::Tensor topp_fused_route_flash_forward_cuda(torch::Tensor route_query,
                                                   int64_t topk,
                                                   double route_p,
                                                   double route_temperature,
+                                                  double route_energy,
                                                   double route_scale,
                                                   double attn_scale,
                                                   int64_t num_heads,
@@ -22,6 +23,7 @@ torch::Tensor topp_fused_route_flash_forward(torch::Tensor route_query,
                                              int64_t topk,
                                              double route_p,
                                              double route_temperature,
+                                             double route_energy,
                                              double route_scale,
                                              double attn_scale,
                                              int64_t num_heads,
@@ -41,8 +43,8 @@ torch::Tensor topp_fused_route_flash_forward(torch::Tensor route_query,
               "kv_pix must be float32");
   return topp_fused_route_flash_forward_cuda(
       route_query.contiguous(), q_pix.contiguous(), kv_pix.contiguous(),
-      topk, route_p, route_temperature, route_scale, attn_scale, num_heads,
-      qk_dim, dim, n_win, height, width);
+      topk, route_p, route_temperature, route_energy, route_scale, attn_scale,
+      num_heads, qk_dim, dim, n_win, height, width);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

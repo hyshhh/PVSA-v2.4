@@ -261,7 +261,7 @@ class TopkRouting(nn.Module):
         topk_index = topk_index.masked_fill(~valid_mask, 0)
         
         #能量补偿
-        topk_score = topk_score * max_len* self.energy
+        topk_score = topk_score * self.energy
 
         if self.flag==4 and self.topk==4:
             print("第3",topk_score[0][0])
@@ -592,6 +592,7 @@ class ToppAttention(nn.Module):
                     topk=self.router.topk,
                     p=self.router.P,
                     temperature=self.router.Temperature,
+                    energy=self.router.energy,
                     route_scale=self.router.scale,
                     attn_scale=self.scale,
                     num_heads=self.num_heads,

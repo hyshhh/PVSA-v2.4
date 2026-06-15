@@ -60,6 +60,7 @@ def topp_flash_fused_attention(route_query: Tensor,
                                topk: int,
                                p: float,
                                temperature: float,
+                               energy: float,
                                route_scale: float,
                                attn_scale: float,
                                num_heads: int,
@@ -81,9 +82,9 @@ def topp_flash_fused_attention(route_query: Tensor,
         extension = _load_cuda_extension()
         return extension.fused_forward(
             route_query.contiguous(), q_pix.contiguous(), kv_pix.contiguous(),
-            int(topk), float(p), float(temperature), float(route_scale),
-            float(attn_scale), int(num_heads), int(qk_dim), int(dim),
-            int(n_win), int(H), int(W))
+            int(topk), float(p), float(temperature), float(energy),
+            float(route_scale), float(attn_scale), int(num_heads),
+            int(qk_dim), int(dim), int(n_win), int(H), int(W))
 
     return _maybe_time_debug(debug, debug_key, debug_path, q_pix, run_fused)
 
