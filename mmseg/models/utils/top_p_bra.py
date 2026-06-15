@@ -15,6 +15,7 @@ from .topp_flash_kernel import is_topp_flash_available, topp_flash_attention
 
 
 DEFAULT_ATTN_VIS_CONFIG = dict(enabled=False)
+_TOPP_FLASH_STAGE_LOGGED = set()
 
 
 def _normalize_route_configs(route_configs: Optional[Dict]) -> Dict[int, Dict]:
@@ -30,6 +31,41 @@ def _normalize_attn_vis_config(attn_vis_config: Optional[Dict]) -> Dict:
     if attn_vis_config:
         config.update(attn_vis_config)
     return config
+
+
+def _time_cuda_stage(enabled: bool, tensor: Tensor, fn):
+    if not enabled or not torch.cuda.is_available() or not tensor.is_cuda:
+        return fn(), None
+    with torch.cuda.device(tensor.device):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        out = fn()
+        end.record()
+        end.synchronize()
+        return out, start.elapsed_time(end)
+
+
+def _log_topp_stage_debug(path: str, x: Tensor, q_pix: Tensor, kv_pix: Tensor,
+                          r_idx: Tensor, times: Dict[str, float],
+                          num_heads: int, qk_dim: int, dim: int,
+                          n_win: int) -> None:
+    if not times:
+        return
+    key = (
+        path, tuple(x.shape), tuple(q_pix.shape), tuple(kv_pix.shape),
+        tuple(r_idx.shape), num_heads, qk_dim, dim, n_win)
+    if key in _TOPP_FLASH_STAGE_LOGGED:
+        return
+    _TOPP_FLASH_STAGE_LOGGED.add(key)
+    parts = ' '.join(
+        f'{name}={elapsed:.4f}ms' for name, elapsed in times.items())
+    print(
+        '[PVSA TopP Stage] '
+        f'path={path} x={tuple(x.shape)} q={tuple(q_pix.shape)} '
+        f'kv={tuple(kv_pix.shape)} route={tuple(r_idx.shape)} '
+        f'heads={num_heads} qk_dim={qk_dim} dim={dim} n_win={n_win} '
+        f'{parts}')
 
 def overlay_topk_attn_block_no_heatmap(img, topk_score, topk_index, total_patches, dark_ratio=0.3):
     """
@@ -477,6 +513,14 @@ class ToppAttention(nn.Module):
             N, H, W, C = x.size()
             assert H % self.n_win == 0 and W % self.n_win == 0  #
         ###################################################
+        stage_debug = self.topp_flash_debug and not ret_attn_mask
+        stage_times = {}
+
+        def run_stage(name, fn):
+            out, elapsed = _time_cuda_stage(stage_debug, x, fn)
+            if elapsed is not None:
+                stage_times[name] = elapsed
+            return out
 
         # patchify, (n, p^2, w, w, c), keep 2d window as we need 2d pooling to reduce kv size
         x = rearrange(x, "n (j h) (i w) c -> n (j i) h w c", j=self.n_win, i=self.n_win)
@@ -485,13 +529,16 @@ class ToppAttention(nn.Module):
         # q: (n, p^2, w, w, c_qk)
         # kv: (n, p^2, w, w, c_qk+c_v)
         # NOTE: separte kv if there were memory leak issue caused by gather
-        q, kv = self.qkv(x)
+        q, kv = run_stage('qkv', lambda: self.qkv(x))
 
         # pixel-wise qkv
         # q_pix: (n, p^2, w^2, c_qk)
         # kv_pix: (n, p^2, h_kv*w_kv, c_qk+c_v)
         q_pix = rearrange(q, 'n p2 h w c -> n p2 (h w) c')
-        kv_pix = self.kv_down(rearrange(kv, 'n p2 h w c -> (n p2) c h w'))
+        kv_pix = run_stage(
+            'kv_down',
+            lambda: self.kv_down(
+                rearrange(kv, 'n p2 h w c -> (n p2) c h w')))
         kv_pix = rearrange(kv_pix, '(n j i) c h w -> n (j i) (h w) c', j=self.n_win, i=self.n_win)
 
         q_win, k_win = q.mean([2, 3]), kv[..., 0:self.qk_dim].mean(
@@ -500,14 +547,19 @@ class ToppAttention(nn.Module):
         ##################side_dwconv(lepe)##################
         # NOTE: call contiguous to avoid gradient warning when using ddp
         # 对值部分应用深度可分离卷积作为位置编码
-        lepe = self.lepe(rearrange(kv[..., self.qk_dim:], 'n (j i) h w c -> n c (j h) (i w)', j=self.n_win,
-                                   i=self.n_win).contiguous())
+        lepe = run_stage(
+            'lepe',
+            lambda: self.lepe(
+                rearrange(kv[..., self.qk_dim:], 'n (j i) h w c -> n c (j h) (i w)', j=self.n_win,
+                          i=self.n_win).contiguous()))
         lepe = rearrange(lepe, 'n c (j h) (i w) -> n (j h) (i w) c', j=self.n_win, i=self.n_win)
 
         ############ gather q dependent k/v #################
 
         # 路由机制
-        r_weight, r_idx, r_mask = self.router(q_win, k_win,GA)  # all are (n, p^2, topk) tensors
+        r_weight, r_idx, r_mask = run_stage(
+            'router',
+            lambda: self.router(q_win, k_win,GA))  # all are (n, p^2, topk) tensors
 
         if self.use_topp_flash and not ret_attn_mask and is_topp_flash_available(
                 self.topp_flash_backend):
