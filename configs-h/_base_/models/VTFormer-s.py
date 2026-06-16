@@ -40,6 +40,10 @@ model = dict(
         mlp_ratios=[3, 3, 3, 3],
         # ------------------------------
         n_win=7,
+        # 可选FAM融合层。默认四层都融合；例如只融合第一层可写成[0]。
+        fam_stages=[0, 1, 2, 3],
+        # 路由窗口特征池化方式：avg为旧版均值池化，avgmax融合均值和最大响应。
+        route_pooling='avgmax',
         kv_downsample_mode='identity',
         kv_per_wins=[-1, -1, -1, -1],
         # 四层网络的 Top-P 路由标志位。每个标志位会到

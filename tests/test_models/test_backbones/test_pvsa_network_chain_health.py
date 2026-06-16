@@ -57,3 +57,34 @@ def test_fusion_head_does_not_allocate_unused_mask_stage():
     assert 'for i in range(3):' in source
     assert 'self.extra_norms.append(LayerNorm2d(self.embed_dim[3]))' in source
     assert 'def _time_cuda_stage' not in source
+
+
+def test_fusion_and_route_mechanism_options_are_configurable():
+    root = _repo_root()
+    backbone = (
+        root / 'mmseg' / 'models' / 'backbones' / 'bi_topp_vote.py'
+    ).read_text(encoding='utf-8')
+    fusion = (
+        root / 'mmseg' / 'models' / 'backbones' / 'biformer_fusion.py'
+    ).read_text(encoding='utf-8')
+    route = (
+        root / 'mmseg' / 'models' / 'utils' / 'top_p_bra.py'
+    ).read_text(encoding='utf-8')
+    model_cfg = (
+        root / 'configs-h' / '_base_' / 'models' / 'VTFormer-s.py'
+    ).read_text(encoding='utf-8')
+    dataset_cfg = (
+        root / 'configs-h' / '_base_' / 'datasets' / 'gqy.py'
+    ).read_text(encoding='utf-8')
+
+    assert 'fam_stages=(0, 1, 2, 3)' in backbone
+    assert 'route_pooling=' in backbone
+    assert 'if i in self.fam_stages:' in fusion
+    assert 'self.bn11 = nn.ModuleList()' in fusion
+    assert 'self.bn12 = nn.ModuleList()' in fusion
+    assert "route_pooling must be one of 'avg', 'max', or 'avgmax'." in route
+    assert 'q_route = 0.5 * (q.mean([2, 3]) + q.amax(dim=(2, 3)))' in route
+    assert 'fam_stages=[0, 1, 2, 3]' in model_cfg
+    assert "route_pooling='avgmax'" in model_cfg
+    assert 'img_scale = (224, 224)' in dataset_cfg
+    assert 'crop_size = (224, 224)' in dataset_cfg

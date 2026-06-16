@@ -14,11 +14,9 @@ _base_ = [
 # --------------------------
 # 数据预处理配置
 # --------------------------
-# 注意: 此 crop_size 仅作为 data_preprocessor 的最小 padding 尺寸,
-# 实际模型输入尺寸由 cityscapes.py 中的 RandomCrop crop_size=(512,512) 决定.
-# 当 pipeline 输出 (512,512) > 此 size (256,256) 时, padding 为 0, 此值不生效.
-crop_size = (256, 256)
-# crop_size = (224, 224)
+# 注意: 此 crop_size 和 gqy.py 中的 RandomCrop/Resize 统一为224，
+# 这样 n_win=7 时各stage特征尺寸可以整除窗口数。
+crop_size = (224, 224)
 data_preprocessor = dict(
     type='SegDataPreProcessor',
     mean=[123.675, 116.28, 103.53],

@@ -394,6 +394,7 @@ class ToppAttention(nn.Module):
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
+                 route_pooling='avgmax',
                  topp_flash_debug=False):
         super().__init__()
         # local attention setting
@@ -413,6 +414,10 @@ class ToppAttention(nn.Module):
         self.use_fast_attention = use_fast_attention
         self.topp_flash_debug = topp_flash_debug
         self._topp_flash_warned = False
+        self.route_pooling = str(route_pooling).strip().lower()
+        if self.route_pooling not in ('avg', 'max', 'avgmax'):
+            raise ValueError(
+                "route_pooling must be one of 'avg', 'max', or 'avgmax'.")
 
         ################side_dwconv (i.e. LCE in ShuntedTransformer)###########
         self.lepe = nn.Conv2d(dim, dim, kernel_size=side_dwconv, stride=1, padding=side_dwconv // 2,
@@ -493,6 +498,16 @@ class ToppAttention(nn.Module):
 
         self.auto_pad = auto_pad
 
+    def _pool_route_tokens(self, q, kv):
+        k = kv[..., 0:self.qk_dim]
+        if self.route_pooling == 'avg':
+            return q.mean([2, 3]), k.mean([2, 3])
+        if self.route_pooling == 'max':
+            return q.amax(dim=(2, 3)), k.amax(dim=(2, 3))
+        q_route = 0.5 * (q.mean([2, 3]) + q.amax(dim=(2, 3)))
+        k_route = 0.5 * (k.mean([2, 3]) + k.amax(dim=(2, 3)))
+        return q_route, k_route
+
     def forward(self, x,GA, ret_attn_mask=False):
         """
         x: NHWC tensor
@@ -550,8 +565,7 @@ class ToppAttention(nn.Module):
                 rearrange(kv, 'n p2 h w c -> (n p2) c h w')))
         kv_pix = rearrange(kv_pix, '(n j i) c h w -> n (j i) (h w) c', j=self.n_win, i=self.n_win)
 
-        q_win, k_win = q.mean([2, 3]), kv[..., 0:self.qk_dim].mean(
-            [2, 3])  # window-wise qk, (n, p^2, c_qk), (n, p^2, c_qk)
+        q_win, k_win = self._pool_route_tokens(q, kv)
 
         ##################side_dwconv(lepe)##################
         # NOTE: call contiguous to avoid gradient warning when using ddp

@@ -537,8 +537,10 @@ class VTFormer(nn.Module):
                  debug_route=False,
                  stage_archs=None,
                  extra_block_type=None,
+                 fam_stages=(0, 1, 2, 3),
                  transformer_branch_depth=None,
                  cnn_branch_depth=None,
+                 route_pooling='avgmax',
                  topp_flash_debug=False):
 
         super().__init__()
@@ -552,6 +554,15 @@ class VTFormer(nn.Module):
         self.use_fast_attention = use_fast_attention
         self.debug_route = debug_route
         self.topp_flash_debug = topp_flash_debug
+        self.fam_stages = tuple(int(stage) for stage in fam_stages)
+        invalid_fam_stages = [
+            stage for stage in self.fam_stages if stage < 0 or stage > 3
+        ]
+        if invalid_fam_stages:
+            raise ValueError(
+                f'fam_stages values must be in [0, 3], got '
+                f'{invalid_fam_stages}.')
+        self.route_pooling = route_pooling
         self.stage_archs = _normalize_stage_archs(
             stage_archs, depth, transformer_branch_depth, cnn_branch_depth,
             extra_block_type)
@@ -673,6 +684,7 @@ class VTFormer(nn.Module):
                         attn_vis_config=self.attn_vis_config,
                         use_fast_attention=self.use_fast_attention,
                         debug_route=self.debug_route,
+                        route_pooling=self.route_pooling,
                         topp_flash_debug=self.topp_flash_debug) for j in range(self.depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
             )
             if i in use_checkpoint_stages:

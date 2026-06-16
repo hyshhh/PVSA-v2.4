@@ -95,12 +95,14 @@ class BiFormer_fusion(VTFormer):
             super().__init__(**kwargs)
         self.topp_flash_debug = topp_flash_debug
         self.extra_norms = nn.ModuleList()
-        self.bn = nn.ModuleList()
+        self.bn11 = nn.ModuleList()
+        self.bn12 = nn.ModuleList()
         self.conv12=nn.ModuleList()
         self.conv11=nn.ModuleList()
         for i in range(3):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
-            self.bn.append(nn.BatchNorm2d(self.embed_dim[i]))
+            self.bn11.append(nn.BatchNorm2d(self.embed_dim[i]))
+            self.bn12.append(nn.BatchNorm2d(self.embed_dim[i]))
             self.conv12.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
             self.conv11.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
         self.extra_norms.append(LayerNorm2d(self.embed_dim[3]))
@@ -150,11 +152,14 @@ class BiFormer_fusion(VTFormer):
         if self.training or self._branch_inference_fused:
             return
         for idx in range(len(self.conv11)):
-            bn = self.bn[idx]
-            if isinstance(bn, nn.modules.batchnorm._BatchNorm) and not bn.training:
-                self.conv11[idx] = fuse_conv_bn_eval(self.conv11[idx], bn)
-                self.conv12[idx] = fuse_conv_bn_eval(self.conv12[idx], bn)
-                self.bn[idx] = nn.Identity()
+            bn11 = self.bn11[idx]
+            if isinstance(bn11, nn.modules.batchnorm._BatchNorm) and not bn11.training:
+                self.conv11[idx] = fuse_conv_bn_eval(self.conv11[idx], bn11)
+                self.bn11[idx] = nn.Identity()
+            bn12 = self.bn12[idx]
+            if isinstance(bn12, nn.modules.batchnorm._BatchNorm) and not bn12.training:
+                self.conv12[idx] = fuse_conv_bn_eval(self.conv12[idx], bn12)
+                self.bn12[idx] = nn.Identity()
         if self.topp_flash_backend in ('cuda', 'cuda_forward'):
             _load_cuda_extension()
         self._branch_inference_fused = True
@@ -206,7 +211,8 @@ class BiFormer_fusion(VTFormer):
                 nonlocal x, cnn_encoder_out
                 x, cnn_encoder_out = run_parallel_branches(
                     i, x, cnn_encoder_out)
-                x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)
+                if i in self.fam_stages:
+                    x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)
                 return x, cnn_encoder_out
 
             _, stage_wall = _time_cuda_wall(
@@ -250,10 +256,10 @@ class BiFormer_fusion(VTFormer):
                 lambda i=i: self.conv12[i](channel1[i + 1]))
             bn_channel1 = _run_with_optional_wall_time(
                 stage_profile, C1, stage_times, 'mask_bn1',
-                lambda i=i: self.sigmoid(self.bn[i](C1)))
+                lambda i=i: self.sigmoid(self.bn11[i](C1)))
             bn_channel2 = _run_with_optional_wall_time(
                 stage_profile, C2, stage_times, 'mask_bn2',
-                lambda i=i: self.sigmoid(self.bn[i](C2)))
+                lambda i=i: self.sigmoid(self.bn12[i](C2)))
             if feature_vis_enabled and i==0:
                 self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{save_dir}/mask1.png')
                 self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
