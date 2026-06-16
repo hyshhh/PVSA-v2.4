@@ -43,6 +43,43 @@ def _normalize_branch_depth(branch_depth, default, name):
     return depths
 
 
+def _normalize_stage_archs(stage_archs, depth, transformer_branch_depth,
+                           cnn_branch_depth):
+    if stage_archs is not None:
+        if len(stage_archs) != 4:
+            raise ValueError('stage_archs must contain 4 stage configs.')
+        normalized = []
+        for idx, stage_cfg in enumerate(stage_archs):
+            cfg = dict(stage_cfg)
+            if 'blocks' not in cfg:
+                raise ValueError(
+                    f'stage_archs[{idx}] must define blocks.')
+            normalized.append(dict(
+                blocks=int(cfg['blocks']),
+                trans_dwconv=int(cfg.get('trans_dwconv', 0)),
+                cnn_dwconv=int(cfg.get('cnn_dwconv', 0))))
+    else:
+        trans_depth = _normalize_branch_depth(
+            transformer_branch_depth, [0, 0, 0, 0],
+            'transformer_branch_depth')
+        cnn_depth = _normalize_branch_depth(
+            cnn_branch_depth, [2, 1, 2, 1], 'cnn_branch_depth')
+        normalized = [
+            dict(
+                blocks=int(depth[idx]),
+                trans_dwconv=trans_depth[idx],
+                cnn_dwconv=cnn_depth[idx])
+            for idx in range(4)
+        ]
+    for idx, cfg in enumerate(normalized):
+        if cfg['blocks'] < 0:
+            raise ValueError(f'stage_archs[{idx}].blocks must be non-negative.')
+        if cfg['trans_dwconv'] < 0 or cfg['cnn_dwconv'] < 0:
+            raise ValueError(
+                f'stage_archs[{idx}] dwconv values must be non-negative.')
+    return normalized
+
+
 def _fuse_conv_bn(conv, bn):
     if not isinstance(bn, nn.modules.batchnorm._BatchNorm):
         return conv, bn
@@ -444,6 +481,7 @@ class VTFormer(nn.Module):
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
+                 stage_archs=None,
                  transformer_branch_depth=None,
                  cnn_branch_depth=None,
                  topp_flash_debug=False):
@@ -459,11 +497,12 @@ class VTFormer(nn.Module):
         self.use_fast_attention = use_fast_attention
         self.debug_route = debug_route
         self.topp_flash_debug = topp_flash_debug
-        self.transformer_branch_depth = _normalize_branch_depth(
-            transformer_branch_depth, [0, 0, 0, 0],
-            'transformer_branch_depth')
-        self.cnn_branch_depth = _normalize_branch_depth(
-            cnn_branch_depth, [2, 1, 2, 1], 'cnn_branch_depth')
+        self.stage_archs = _normalize_stage_archs(
+            stage_archs, depth, transformer_branch_depth, cnn_branch_depth)
+        self.depth = [cfg['blocks'] for cfg in self.stage_archs]
+        self.transformer_branch_depth = [
+            cfg['trans_dwconv'] for cfg in self.stage_archs]
+        self.cnn_branch_depth = [cfg['cnn_dwconv'] for cfg in self.stage_archs]
         self._inference_fused = False
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -573,7 +612,7 @@ class VTFormer(nn.Module):
 
         self.stages = nn.ModuleList()  # 4 feature resolution stages, each consisting of multiple residual blocks
         nheads = [dim // head_dim for dim in qk_dims]
-        dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
+        dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(self.depth))]
         cur = 0
         assert len(topks) == 4, 'topks must contain 4 stage flags.'
         for i in range(4):
@@ -608,12 +647,12 @@ class VTFormer(nn.Module):
                         attn_vis_config=self.attn_vis_config,
                         use_fast_attention=self.use_fast_attention,
                         debug_route=self.debug_route,
-                        topp_flash_debug=self.topp_flash_debug) for j in range(depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
+                        topp_flash_debug=self.topp_flash_debug) for j in range(self.depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
             self.stages.append(stage)
-            cur += depth[i]
+            cur += self.depth[i]
 
         ##########################################################################
         self.norm = nn.BatchNorm2d(embed_dim[-1])
