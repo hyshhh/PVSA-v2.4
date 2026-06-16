@@ -29,6 +29,11 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
 python tools/analysis_tools/get_flops.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py --shape 224 224
 ```
+按 stage 看 cnn / transformer / FAM / fusion：
+```bash
+python tools/analysis_tools/pvsa_stage_complexity.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py --shape 224 224
+```
 ## 推理并保存分割结果
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/test.py \
