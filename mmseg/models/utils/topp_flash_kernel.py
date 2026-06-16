@@ -48,6 +48,7 @@ def topp_route_cuda(query: Tensor,
                     temperature: float,
                     energy: float,
                     scale: float,
+                    full_route: bool = False,
                     debug: bool = False) -> Tuple[Tensor, Tensor, Tensor]:
     """CUDA route kernel for fixed 7x7 windows.
 
@@ -58,13 +59,13 @@ def topp_route_cuda(query: Tensor,
     debug_path = 'cuda_route'
     if debug:
         debug_key = _log_topp_route_debug(
-            query, topk, p, temperature, energy, scale)
+            query, topk, p, temperature, energy, scale, full_route)
 
     def run_route():
         extension = _load_cuda_extension()
         return tuple(extension.route_forward(
             query.contiguous(), int(topk), float(p), float(temperature),
-            float(energy), float(scale)))
+            float(energy), float(scale), bool(full_route)))
 
     return _maybe_time_debug(debug, debug_key, debug_path, query, run_route)
 
@@ -282,11 +283,11 @@ def _log_topp_flash_debug(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
 
 def _log_topp_route_debug(query: Tensor, topk: int, p: float,
                           temperature: float, energy: float,
-                          scale: float) -> tuple:
+                          scale: float, full_route: bool) -> tuple:
     path = 'cuda_route'
     key = (
         path, str(query.dtype), tuple(query.shape), int(topk), float(p),
-        float(temperature), float(energy), float(scale))
+        float(temperature), float(energy), float(scale), bool(full_route))
     if key not in _CUDA_DEBUG_LOGGED:
         _CUDA_DEBUG_LOGGED.add(key)
     return key

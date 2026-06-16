@@ -56,7 +56,8 @@ __global__ void topp_route_nwin7_kernel_fixed(
     float p,
     float temperature,
     float energy,
-    float scale)
+    float scale,
+    bool full_route)
 {
   __shared__ float s_scores[SPECIAL_P2];
   __shared__ float s_q_norm_acc[BLOCK_THREADS];
@@ -67,6 +68,21 @@ __global__ void topp_route_nwin7_kernel_fixed(
   const int tid = threadIdx.x;
   const int64_t q_base =
       (static_cast<int64_t>(batch) * SPECIAL_P2 + q_win) * QK_DIM;
+
+  if (full_route)
+  {
+    const int64_t out_base = static_cast<int64_t>(row) * topk;
+    for (int tk = tid; tk < topk; tk += BLOCK_THREADS)
+    {
+      route_weight[out_base + tk] = 1.0f;
+      route_idx[out_base + tk] = static_cast<int32_t>(tk);
+    }
+    if (tid == 0)
+    {
+      route_keep_len[row] = static_cast<int32_t>(topk);
+    }
+    return;
+  }
 
   float norm_acc = 0.0f;
   for (int d = tid; d < QK_DIM; d += BLOCK_THREADS)
@@ -346,6 +362,7 @@ void launch_route_batch_nwin7(torch::Tensor query,
                               float temperature,
                               float energy,
                               float scale,
+                              bool full_route,
                               cudaStream_t stream)
 {
   const int route_blocks = static_cast<int>(n * SPECIAL_P2);
@@ -354,7 +371,7 @@ void launch_route_batch_nwin7(torch::Tensor query,
       <<<route_blocks, ROUTE_BLOCK_THREADS, 0, stream>>>(
           query.data_ptr<float>(), route_weight.data_ptr<float>(),
           route_idx.data_ptr<int32_t>(), route_keep_len.data_ptr<int32_t>(),
-          n, topk, p, temperature, energy, scale);
+          n, topk, p, temperature, energy, scale, full_route);
 }
 
 template <typename scalar_t, int NUM_HEADS, int QUERY_TILE>
@@ -533,13 +550,16 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
                                                    double p,
                                                    double temperature,
                                                    double energy,
-                                                   double scale)
+                                                   double scale,
+                                                   bool full_route)
 {
   TORCH_CHECK(query.scalar_type() == torch::kFloat32,
               "route query must be float32");
   TORCH_CHECK(query.size(1) == SPECIAL_P2, "route query p2 must be 49");
   TORCH_CHECK(topk > 0 && topk <= SPECIAL_MAX_TOPK,
               "route topk must be in [1, 49]");
+  TORCH_CHECK(!full_route || topk == SPECIAL_MAX_TOPK,
+              "full route CUDA requires topk=49");
   const int64_t n = query.size(0);
   const int64_t qk_dim = query.size(2);
   auto route_weight = torch::empty({n, SPECIAL_P2, topk}, query.options());
@@ -554,28 +574,32 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
     launch_route_batch_nwin7<64>(
         query, route_weight, route_idx, route_keep_len, n, topk,
         static_cast<float>(p), static_cast<float>(temperature),
-        static_cast<float>(energy), static_cast<float>(scale), stream);
+        static_cast<float>(energy), static_cast<float>(scale),
+        full_route, stream);
   }
   else if (qk_dim == 128)
   {
     launch_route_batch_nwin7<128>(
         query, route_weight, route_idx, route_keep_len, n, topk,
         static_cast<float>(p), static_cast<float>(temperature),
-        static_cast<float>(energy), static_cast<float>(scale), stream);
+        static_cast<float>(energy), static_cast<float>(scale),
+        full_route, stream);
   }
   else if (qk_dim == 256)
   {
     launch_route_batch_nwin7<256>(
         query, route_weight, route_idx, route_keep_len, n, topk,
         static_cast<float>(p), static_cast<float>(temperature),
-        static_cast<float>(energy), static_cast<float>(scale), stream);
+        static_cast<float>(energy), static_cast<float>(scale),
+        full_route, stream);
   }
   else if (qk_dim == 512)
   {
     launch_route_batch_nwin7<512>(
         query, route_weight, route_idx, route_keep_len, n, topk,
         static_cast<float>(p), static_cast<float>(temperature),
-        static_cast<float>(energy), static_cast<float>(scale), stream);
+        static_cast<float>(energy), static_cast<float>(scale),
+        full_route, stream);
   }
   else
   {

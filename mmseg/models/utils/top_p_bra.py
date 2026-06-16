@@ -397,7 +397,8 @@ class ToppAttention(nn.Module):
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
-                 topp_flash_debug=False):
+                 topp_flash_debug=False,
+                 topp_flash_full_last_stage=False):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -416,6 +417,7 @@ class ToppAttention(nn.Module):
         self.attn_vis_config = attn_vis_config
         self.use_fast_attention = use_fast_attention
         self.topp_flash_debug = topp_flash_debug
+        self.topp_flash_full_last_stage = topp_flash_full_last_stage
         self._topp_flash_warned = False
 
         ################side_dwconv (i.e. LCE in ShuntedTransformer)###########
@@ -579,6 +581,10 @@ class ToppAttention(nn.Module):
 
             route_with_cuda = str(self.topp_flash_backend or '').strip().lower() in (
                 'cuda', 'cuda_forward')
+            full_route = (
+                self.topp_flash_full_last_stage and
+                self.qk_dim == 512 and self.dim == 512 and
+                self.n_win == 7 and self.router.topk == 49)
             if route_with_cuda and can_run_topp_route_cuda(
                     q_win, self.router.topk):
                 try:
@@ -591,6 +597,7 @@ class ToppAttention(nn.Module):
                             temperature=self.router.Temperature,
                             energy=self.router.energy,
                             scale=self.router.scale,
+                            full_route=full_route,
                             debug=False))
                     r_mask = None
                     if stage_debug:
@@ -601,6 +608,7 @@ class ToppAttention(nn.Module):
                             temperature=self.router.Temperature,
                             energy=self.router.energy,
                             scale=self.router.scale,
+                            full_route=full_route,
                             debug=True)
                         router_kernel_ms = consume_topp_kernel_timing(
                             'Router kernel')
@@ -663,9 +671,11 @@ class ToppAttention(nn.Module):
             out = run_stage('wo', lambda: self.wo(out))
             if self.auto_pad and (pad_r > 0 or pad_b > 0):
                 out = out[:, :H_in, :W_in, :].contiguous()
+            log_path = f'topp_flash_{self.topp_flash_backend or "torch"}'
+            if full_route:
+                log_path = f'{log_path}_full_last'
             _log_topp_stage_debug(
-                f'topp_flash_{self.topp_flash_backend or "torch"}',
-                x, q_pix, kv_pix, r_idx,
+                log_path, x, q_pix, kv_pix, r_idx,
                 stage_times, self.num_heads, self.qk_dim, self.dim,
                 self.n_win)
             return out

@@ -61,6 +61,8 @@ model = dict(
         # 打开后打印 PVSA TopP Stage，包括 Transformer、Router kernel、
         # Flash kernel、CNN 分支和融合模块耗时。
         topp_flash_debug=False,
+        # 实验开关：最后一层跳过 Top-P 路由，直接用 49 个窗口全连接注意力。
+        topp_flash_full_last_stage=False,
         use_pruned_kv_gather=False,
         # pruned_kv_gather 粗分桶数量。按 keep_len 范围切成 N 个桶，
         # 例如 topk=8 且 N=2 时，桶范围为 1-4 和 5-8。

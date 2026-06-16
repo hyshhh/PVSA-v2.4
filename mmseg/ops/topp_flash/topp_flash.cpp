@@ -21,7 +21,8 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
                                                    double p,
                                                    double temperature,
                                                    double energy,
-                                                   double scale);
+                                                   double scale,
+                                                   bool full_route);
 
 torch::Tensor topp_flash_forward(torch::Tensor q_pix,
                                  torch::Tensor kv_pix,
@@ -51,10 +52,11 @@ std::vector<torch::Tensor> topp_route_forward(torch::Tensor query,
                                               double p,
                                               double temperature,
                                               double energy,
-                                              double scale) {
+                                              double scale,
+                                              bool full_route) {
   TORCH_CHECK(query.is_cuda(), "query must be a CUDA tensor");
   return topp_route_forward_cuda(query.contiguous(), topk, p, temperature,
-                                 energy, scale);
+                                 energy, scale, full_route);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
