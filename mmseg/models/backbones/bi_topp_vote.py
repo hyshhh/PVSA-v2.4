@@ -358,7 +358,12 @@ class DepthWiseConvModule(nn.Module):
 
 
 class MBConvModule(nn.Module):
-    def __init__(self, channels, expansion=4, kernel_size=3, drop_rate=0.):
+    def __init__(self,
+                 channels,
+                 expansion=4,
+                 kernel_size=3,
+                 drop_rate=0.,
+                 layer_scale=1e-6):
         super().__init__()
         hidden_channels = int(channels * expansion)
         padding = kernel_size // 2
@@ -372,12 +377,17 @@ class MBConvModule(nn.Module):
         self.bn3 = nn.BatchNorm2d(channels)
         self.act = nn.GELU()
         self.drop = nn.Dropout(drop_rate)
+        self.gamma = nn.Parameter(
+            layer_scale * torch.ones(channels), requires_grad=True
+        ) if layer_scale > 0 else None
 
     def forward(self, x):
         identity = x
         x = self.act(self.bn1(self.expand(x)))
         x = self.act(self.bn2(self.dwconv(x)))
         x = self.drop(self.bn3(self.project(x)))
+        if self.gamma is not None:
+            x = self.gamma.view(1, -1, 1, 1) * x
         return x + identity
 
     def fuse_for_inference(self):
@@ -427,7 +437,8 @@ def _make_extra_block(channels, cfg):
             kernel_size=kernel_size, stride=1)
     if block_type == 'mbconv':
         return MBConvModule(
-            channels, expansion=expansion, kernel_size=kernel_size)
+            channels, expansion=expansion, kernel_size=kernel_size,
+            layer_scale=cfg.get('layer_scale', 1e-6))
     if block_type == 'convnext':
         return ConvNeXtBlock(
             channels, expansion=expansion, kernel_size=kernel_size,

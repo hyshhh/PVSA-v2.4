@@ -121,4 +121,6 @@ model = dict(
     data_preprocessor=data_preprocessor,
     test_cfg=dict(mode='whole')
 )
-checkpoint_config = dict(by_epoch=True, interval=10)  # 每个 epoch 保存一次
+default_hooks = dict(
+    checkpoint=dict(type='CheckpointHook', by_epoch=True, interval=25)
+)
