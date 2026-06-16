@@ -13,27 +13,29 @@ model = dict(
     backbone=dict(
         type='BiFormer_fusion',
         embed_dim=[64, 128, 256, 512],     # BiFormer的通道配置
+        # 一键切换所有额外骨干模块，支持'dwconv'、'mbconv'、'convnext'。
+        # 只改这里即可全局切换，stage_archs里只保留每层depth。
+        extra_block_type='dwconv',
         # 每个stage的结构：
         # blocks是Transformer Block数量；
-        # trans_extra/cnn_extra分别控制两条分支下采样后的额外骨干模块；
-        # type可选'dwconv'、'mbconv'、'convnext'，depth表示堆叠数量。
+        # trans_extra/cnn_extra分别控制两条分支下采样后的额外骨干模块数量。
         stage_archs=[
             dict(
                 blocks=3,
-                trans_extra=dict(type='dwconv', depth=0),
-                cnn_extra=dict(type='dwconv', depth=2)),
+                trans_extra=dict(depth=0),
+                cnn_extra=dict(depth=2)),
             dict(
                 blocks=4,
-                trans_extra=dict(type='dwconv', depth=0),
-                cnn_extra=dict(type='dwconv', depth=1)),
+                trans_extra=dict(depth=0),
+                cnn_extra=dict(depth=1)),
             dict(
                 blocks=6,
-                trans_extra=dict(type='dwconv', depth=0),
-                cnn_extra=dict(type='dwconv', depth=2)),
+                trans_extra=dict(depth=0),
+                cnn_extra=dict(depth=2)),
             dict(
                 blocks=3,
-                trans_extra=dict(type='dwconv', depth=0),
-                cnn_extra=dict(type='dwconv', depth=1)),
+                trans_extra=dict(depth=0),
+                cnn_extra=dict(depth=1)),
         ],
         mlp_ratios=[3, 3, 3, 3],
         # ------------------------------

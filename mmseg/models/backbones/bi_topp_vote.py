@@ -34,21 +34,26 @@ def _normalize_branch_depth(branch_depth, default, name):
     return depths
 
 
-def _normalize_extra_block_cfg(extra_cfg, fallback_depth=0):
+def _normalize_extra_block_cfg(extra_cfg, fallback_depth=0, block_type=None):
     if extra_cfg is None:
-        return dict(type='dwconv', depth=int(fallback_depth))
-    if isinstance(extra_cfg, int):
-        return dict(type='dwconv', depth=int(extra_cfg))
-    cfg = dict(extra_cfg)
-    cfg.setdefault('type', 'dwconv')
-    cfg.setdefault('depth', fallback_depth)
+        cfg = dict(type='dwconv', depth=int(fallback_depth))
+    elif isinstance(extra_cfg, int):
+        cfg = dict(type='dwconv', depth=int(extra_cfg))
+    else:
+        cfg = dict(extra_cfg)
+        cfg.setdefault('type', 'dwconv')
+        cfg.setdefault('depth', fallback_depth)
+    if block_type is not None:
+        cfg['type'] = block_type
     cfg['type'] = str(cfg['type']).strip().lower()
     cfg['depth'] = int(cfg['depth'])
     return cfg
 
 
 def _normalize_stage_archs(stage_archs, depth, transformer_branch_depth,
-                           cnn_branch_depth):
+                           cnn_branch_depth, extra_block_type=None):
+    if extra_block_type is not None:
+        extra_block_type = str(extra_block_type).strip().lower()
     if stage_archs is not None:
         if len(stage_archs) != 4:
             raise ValueError('stage_archs must contain 4 stage configs.')
@@ -59,9 +64,11 @@ def _normalize_stage_archs(stage_archs, depth, transformer_branch_depth,
                 raise ValueError(
                     f'stage_archs[{idx}] must define blocks.')
             trans_extra = _normalize_extra_block_cfg(
-                cfg.get('trans_extra'), cfg.get('trans_dwconv', 0))
+                cfg.get('trans_extra'), cfg.get('trans_dwconv', 0),
+                extra_block_type)
             cnn_extra = _normalize_extra_block_cfg(
-                cfg.get('cnn_extra'), cfg.get('cnn_dwconv', 0))
+                cfg.get('cnn_extra'), cfg.get('cnn_dwconv', 0),
+                extra_block_type)
             normalized.append(dict(
                 blocks=int(cfg['blocks']),
                 trans_extra=trans_extra,
@@ -75,8 +82,10 @@ def _normalize_stage_archs(stage_archs, depth, transformer_branch_depth,
         normalized = [
             dict(
                 blocks=int(depth[idx]),
-                trans_extra=_normalize_extra_block_cfg(trans_depth[idx]),
-                cnn_extra=_normalize_extra_block_cfg(cnn_depth[idx]))
+                trans_extra=_normalize_extra_block_cfg(
+                    trans_depth[idx], block_type=extra_block_type),
+                cnn_extra=_normalize_extra_block_cfg(
+                    cnn_depth[idx], block_type=extra_block_type))
             for idx in range(4)
         ]
     for idx, cfg in enumerate(normalized):
@@ -542,6 +551,7 @@ class VTFormer(nn.Module):
                  use_fast_attention=False,
                  debug_route=False,
                  stage_archs=None,
+                 extra_block_type=None,
                  transformer_branch_depth=None,
                  cnn_branch_depth=None,
                  topp_flash_debug=False):
@@ -558,7 +568,8 @@ class VTFormer(nn.Module):
         self.debug_route = debug_route
         self.topp_flash_debug = topp_flash_debug
         self.stage_archs = _normalize_stage_archs(
-            stage_archs, depth, transformer_branch_depth, cnn_branch_depth)
+            stage_archs, depth, transformer_branch_depth, cnn_branch_depth,
+            extra_block_type)
         self.depth = [cfg['blocks'] for cfg in self.stage_archs]
         self._inference_fused = False
         self.num_classes = num_classes

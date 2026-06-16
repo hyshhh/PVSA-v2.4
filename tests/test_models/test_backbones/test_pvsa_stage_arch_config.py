@@ -11,6 +11,7 @@ def test_vtformer_exposes_stage_arch_config():
     ).read_text(encoding='utf-8')
 
     assert 'stage_archs=None' in source
+    assert 'extra_block_type=None' in source
     assert "cfg['blocks']" in source
     assert "cfg.get('trans_extra')" in source
     assert "cfg.get('cnn_extra')" in source
@@ -19,8 +20,9 @@ def test_vtformer_exposes_stage_arch_config():
     assert 'class MBConvModule' in source
     assert 'class ConvNeXtBlock' in source
     assert 'stage_archs=[' in config
-    assert "trans_extra=dict(type='dwconv', depth=0)" in config
-    assert "cnn_extra=dict(type='dwconv', depth=2)" in config
+    assert "extra_block_type='dwconv'" in config
+    assert "trans_extra=dict(depth=0)" in config
+    assert "cnn_extra=dict(depth=2)" in config
     assert "'dwconv', 'mbconv', 'convnext'" in source
 
 
