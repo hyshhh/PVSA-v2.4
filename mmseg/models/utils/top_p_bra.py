@@ -12,6 +12,7 @@ from einops import rearrange
 from torch import Tensor
 
 from .topp_flash_kernel import (can_run_topp_route_cuda,
+                                consume_topp_kernel_timing,
                                 is_topp_flash_available,
                                 topp_flash_attention, topp_route_cuda,
                                 warn_topp_route_cuda_fallback)
@@ -601,6 +602,10 @@ class ToppAttention(nn.Module):
                             energy=self.router.energy,
                             scale=self.router.scale,
                             debug=True)
+                        router_kernel_ms = consume_topp_kernel_timing(
+                            'Router kernel')
+                        if router_kernel_ms is not None:
+                            stage_times['Router kernel'] = router_kernel_ms
                 except Exception as exc:
                     warn_topp_route_cuda_fallback(str(exc))
                     r_weight, r_idx, r_mask = run_stage(
@@ -651,6 +656,9 @@ class ToppAttention(nn.Module):
                     W=W,
                     backend=self.topp_flash_backend,
                     debug=True)
+                flash_kernel_ms = consume_topp_kernel_timing('Flash kernel')
+                if flash_kernel_ms is not None:
+                    stage_times['Flash kernel'] = flash_kernel_ms
             out = out + lepe
             out = run_stage('wo', lambda: self.wo(out))
             if self.auto_pad and (pad_r > 0 or pad_b > 0):

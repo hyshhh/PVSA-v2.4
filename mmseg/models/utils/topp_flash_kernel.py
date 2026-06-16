@@ -24,6 +24,7 @@ _CUDA_FALLBACK_WARNED = False
 _CUDA_DEBUG_LOGGED = set()
 _CUDA_TIMING_LOGGED = set()
 _ROUTE_CUDA_FALLBACK_WARNED = False
+_LAST_KERNEL_TIMINGS = {}
 
 
 def _normalize_backend(backend: Optional[str] = None) -> str:
@@ -167,6 +168,10 @@ def warn_topp_route_cuda_fallback(reason: str) -> None:
     warnings.warn(
         f'topp route CUDA path failed; fallback to torch route. {reason}')
     _ROUTE_CUDA_FALLBACK_WARNED = True
+
+
+def consume_topp_kernel_timing(label: str) -> Optional[float]:
+    return _LAST_KERNEL_TIMINGS.pop(label, None)
 
 
 def topp_attention_reference(q_pix: Tensor,
@@ -351,28 +356,8 @@ def _log_topp_flash_debug(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
         backend, path, str(q_pix.dtype), tuple(q_pix.shape),
         tuple(kv_pix.shape), tuple(r_idx.shape), num_heads, qk_dim, dim,
         n_win, H, W)
-    if key in _CUDA_DEBUG_LOGGED:
-        return path, key
-    _CUDA_DEBUG_LOGGED.add(key)
-
-    keep_min = int(keep_len.min().item()) if keep_len.numel() else 0
-    keep_max = int(keep_len.max().item()) if keep_len.numel() else 0
-    keep_mean = float(keep_len.float().mean().item()) if keep_len.numel() else 0.0
-    q_len = q_pix.size(2)
-    kv_len = kv_pix.size(2)
-    topk = r_idx.size(2)
-    reject = _specialized_cuda_reject_reasons(
-        q_pix, r_idx, num_heads, qk_dim, dim, n_win, H, W)
-    print(
-        '[PVSA TopP Flash] '
-        f'backend={backend} path={path} build={can_build} can_run={can_run} '
-        f'specialized={specialized} dtype={q_pix.dtype} '
-        f'q={tuple(q_pix.shape)} kv={tuple(kv_pix.shape)} '
-        f'route={tuple(r_idx.shape)} keep=min/mean/max '
-        f'{keep_min}/{keep_mean:.2f}/{keep_max} '
-        f'heads={num_heads} qk_dim={qk_dim} dim={dim} n_win={n_win} '
-        f'H={H} W={W} q_len={q_len} kv_len={kv_len} topk={topk} '
-        f'special_reject={reject}')
+    if key not in _CUDA_DEBUG_LOGGED:
+        _CUDA_DEBUG_LOGGED.add(key)
     return path, key
 
 
@@ -386,37 +371,20 @@ def _log_topp_fused_debug(route_query: Tensor, q_pix: Tensor, kv_pix: Tensor,
         'cuda_fused_route', str(q_pix.dtype), tuple(route_query.shape),
         tuple(q_pix.shape), tuple(kv_pix.shape), int(topk), num_heads,
         qk_dim, dim, n_win, H, W)
-    if key in _CUDA_DEBUG_LOGGED:
-        return key
-    _CUDA_DEBUG_LOGGED.add(key)
-    print(
-        '[PVSA TopP Flash] '
-        f'backend=cuda path=cuda_fused_route build={can_build} '
-        f'can_run={can_run} specialized=True dtype={q_pix.dtype} '
-        f'route_query={tuple(route_query.shape)} q={tuple(q_pix.shape)} '
-        f'kv={tuple(kv_pix.shape)} heads={num_heads} qk_dim={qk_dim} '
-        f'dim={dim} n_win={n_win} H={H} W={W} '
-        f'q_len={q_pix.size(2)} kv_len={kv_pix.size(2)} topk={topk}')
+    if key not in _CUDA_DEBUG_LOGGED:
+        _CUDA_DEBUG_LOGGED.add(key)
     return key
 
 
 def _log_topp_route_debug(query: Tensor, topk: int, p: float,
                           temperature: float, energy: float,
                           scale: float) -> tuple:
-    can_build = _can_build_cuda_extension()
-    can_run = can_run_topp_route_cuda(query, topk)
     path = 'cuda_route'
     key = (
         path, str(query.dtype), tuple(query.shape), int(topk), float(p),
         float(temperature), float(energy), float(scale))
-    if key in _CUDA_DEBUG_LOGGED:
-        return key
-    _CUDA_DEBUG_LOGGED.add(key)
-    print(
-        '[PVSA TopP Route] '
-        f'backend=cuda path={path} build={can_build} can_run={can_run} '
-        f'dtype={query.dtype} q={tuple(query.shape)} topk={topk} '
-        f'p={p} temperature={temperature} energy={energy} scale={scale}')
+    if key not in _CUDA_DEBUG_LOGGED:
+        _CUDA_DEBUG_LOGGED.add(key)
     return key
 
 
@@ -450,10 +418,7 @@ def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
         label = 'Router kernel'
     elif debug_path == 'torch_block':
         label = 'Torch block'
-    print(
-        '[PVSA TopP Flash] '
-        f'{label} path={debug_path} elapsed_ms={elapsed_ms:.4f} '
-        f'warmup={warmup} repeat={repeat}')
+    _LAST_KERNEL_TIMINGS[label] = elapsed_ms
     return out
 
 
