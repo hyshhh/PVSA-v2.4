@@ -8,8 +8,8 @@
 只使用原始路径训练：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --work-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.3/work_dirs/gqy \
-  --cfg-options model.backbone.topp_flash_backend=None model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=16
+  --cfg-options model.backbone.topp_flash_backend=None model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=16 \
+  --work-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.3/work_dirs/gqy
 ```
 ## 原始路径推理
 ```bash
