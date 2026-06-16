@@ -7,6 +7,8 @@ before replacing the inner block with a hand-written CUDA kernel.
 """
 
 import os
+import contextlib
+import io
 import warnings
 from pathlib import Path
 from typing import Optional, Tuple
@@ -579,12 +581,21 @@ def _load_cuda_extension():
     arch_list = os.getenv('PVSA_TOPP_FLASH_ARCH')   #通过环境指定目标GPU架构
     if arch_list:
         os.environ['TORCH_CUDA_ARCH_LIST'] = arch_list
+    verbose = os.getenv('PVSA_TOPP_FLASH_VERBOSE', '0') == '1'
     try:
-        _CUDA_EXTENSION = load(  #核心调用：torch.utils.cpp_extension.load() 是 PyTorch 的 JIT 编译器。把 C++/CUDA 源码编译成 Python 可调用的模块。
-            name='pvsa_topp_flash_cuda',   # 编译产物的名字Linux——共享库（多个程序可以共享的代码库）——pvsa_topp_flash_cuda.so
-            sources=[str(cpp_path), str(cu_path)], # 要编译的源文件
-            extra_cuda_cflags=extra_cuda_cflags,  # nvcc 编译参数
-            verbose=os.getenv('PVSA_TOPP_FLASH_VERBOSE', '0') == '1') # 是否打印编译日志
+        if verbose:
+            _CUDA_EXTENSION = load(  #核心调用：torch.utils.cpp_extension.load() 是 PyTorch 的 JIT 编译器。把 C++/CUDA 源码编译成 Python 可调用的模块。
+                name='pvsa_topp_flash_cuda',   # 编译产物的名字Linux——共享库（多个程序可以共享的代码库）——pvsa_topp_flash_cuda.so
+                sources=[str(cpp_path), str(cu_path)], # 要编译的源文件
+                extra_cuda_cflags=extra_cuda_cflags,
+                verbose=True)
+        else:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                _CUDA_EXTENSION = load(
+                    name='pvsa_topp_flash_cuda',
+                    sources=[str(cpp_path), str(cu_path)],
+                    extra_cuda_cflags=extra_cuda_cflags,
+                    verbose=False)
     # 最终存到全局变量中，全局变量不会随之函数的结束而销毁//程序结束文件还在
     except Exception as exc:
         _CUDA_EXTENSION_ERROR = exc

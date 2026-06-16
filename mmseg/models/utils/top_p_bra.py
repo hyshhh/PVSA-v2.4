@@ -679,10 +679,11 @@ class ToppAttention(nn.Module):
             log_path = f'topp_flash_{self.topp_flash_backend or "torch"}'
             if full_route:
                 log_path = f'{log_path}_full_last'
-            _log_topp_stage_debug(
-                log_path, x, q_pix, kv_pix, r_idx,
-                stage_times, self.num_heads, self.qk_dim, self.dim,
-                self.n_win)
+            if stage_debug:
+                _log_topp_stage_debug(
+                    log_path, x, q_pix, kv_pix, r_idx,
+                    stage_times, self.num_heads, self.qk_dim, self.dim,
+                    self.n_win)
             return out
 
         # 路由机制
