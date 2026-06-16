@@ -15,6 +15,7 @@ constexpr int SPECIAL_N_WIN = 7;
 constexpr int SPECIAL_P2 = SPECIAL_N_WIN * SPECIAL_N_WIN;
 constexpr int SPECIAL_HEAD_DIM = 32;
 constexpr int SPECIAL_MAX_TOPK = 49;
+constexpr int SPECIAL_PAIR_COUNT = SPECIAL_P2 * (SPECIAL_P2 + 1) / 2;
 constexpr int SPECIAL_KV_TILE = 32;
 constexpr int GENERIC_MAX_ELEMS_PER_LANE = 16;
 constexpr int ROUTE_THREADS = 128;
@@ -42,6 +43,157 @@ __device__ __forceinline__ int64_t nhwc_offset(int64_t batch,
                                                int64_t width,
                                                int64_t dim) {
   return ((batch * height + h) * width + w) * dim + c;
+}
+
+__device__ __forceinline__ void route_upper_pair_from_index(int pair,
+                                                            int *row,
+                                                            int *col) {
+  int r = 0;
+  int remaining = pair;
+#pragma unroll
+  for (int width = SPECIAL_P2; width > 0; width--) {
+    if (remaining < width) {
+      *row = r;
+      *col = r + remaining;
+      return;
+    }
+    remaining -= width;
+    r++;
+  }
+  *row = SPECIAL_P2 - 1;
+  *col = SPECIAL_P2 - 1;
+}
+
+template <int QK_DIM>
+__global__ void topp_route_norm_nwin7_kernel(
+    const float *__restrict__ query,
+    float *__restrict__ route_norm,
+    int64_t n) {
+  const int row = blockIdx.x;
+  const int lane = threadIdx.x;
+  const int64_t base = static_cast<int64_t>(row) * QK_DIM;
+
+  float sum = 0.0f;
+#pragma unroll 4
+  for (int d = lane; d < QK_DIM; d += WARP_SIZE) {
+    const float qv = query[base + d];
+    sum += qv * qv;
+  }
+  sum = warp_reduce_sum(sum);
+  if (lane == 0) {
+    route_norm[row] = fmaxf(sum, 1.0e-24f);
+  }
+}
+
+template <int QK_DIM>
+__global__ void topp_route_score_nwin7_kernel(
+    const float *__restrict__ query,
+    const float *__restrict__ route_norm,
+    float *__restrict__ route_score,
+    int64_t n,
+    float scale) {
+  const int64_t global_pair = blockIdx.x;
+  const int batch = static_cast<int>(global_pair / SPECIAL_PAIR_COUNT);
+  const int pair = static_cast<int>(global_pair - batch * SPECIAL_PAIR_COUNT);
+  const int lane = threadIdx.x;
+  int row = 0;
+  int col = 0;
+  route_upper_pair_from_index(pair, &row, &col);
+
+  const int64_t batch_base =
+      static_cast<int64_t>(batch) * SPECIAL_P2 * QK_DIM;
+  const int64_t row_base = batch_base + static_cast<int64_t>(row) * QK_DIM;
+  const int64_t col_base = batch_base + static_cast<int64_t>(col) * QK_DIM;
+
+  float dot = 0.0f;
+#pragma unroll 4
+  for (int d = lane; d < QK_DIM; d += WARP_SIZE) {
+    dot += query[row_base + d] * query[col_base + d];
+  }
+  dot = warp_reduce_sum(dot);
+
+  if (lane == 0) {
+    const int64_t norm_base = static_cast<int64_t>(batch) * SPECIAL_P2;
+    const float inv_row = rsqrtf(route_norm[norm_base + row]);
+    const float inv_col = rsqrtf(route_norm[norm_base + col]);
+    const float score = dot * inv_row * inv_col * scale;
+    const int64_t score_base = norm_base * SPECIAL_P2;
+    route_score[score_base + row * SPECIAL_P2 + col] = score;
+    route_score[score_base + col * SPECIAL_P2 + row] = score;
+  }
+}
+
+__global__ void topp_route_select_nwin7_kernel(
+    const float *__restrict__ route_score,
+    float *__restrict__ route_weight,
+    int32_t *__restrict__ route_idx,
+    int32_t *__restrict__ route_keep_len,
+    int64_t n,
+    int64_t topk,
+    float p,
+    float temperature,
+    float energy) {
+  const int row = blockIdx.x;
+  const int tid = threadIdx.x;
+  if (tid != 0) {
+    return;
+  }
+
+  float selected_scores[SPECIAL_MAX_TOPK];
+  int selected_idx[SPECIAL_MAX_TOPK];
+  const int64_t score_base = static_cast<int64_t>(row) * SPECIAL_P2;
+
+  for (int tk = 0; tk < topk; tk++) {
+    float best = -INFINITY;
+    int best_idx = 0;
+    for (int col = 0; col < SPECIAL_P2; col++) {
+      const float score = route_score[score_base + col];
+      bool used = false;
+      for (int prev = 0; prev < tk; prev++) {
+        if (selected_idx[prev] == col) {
+          used = true;
+          break;
+        }
+      }
+      if (!used && (score > best || (score == best && col < best_idx))) {
+        best = score;
+        best_idx = col;
+      }
+    }
+    selected_scores[tk] = best;
+    selected_idx[tk] = best_idx;
+  }
+
+  float max_score = -INFINITY;
+  for (int tk = 0; tk < topk; tk++) {
+    max_score = fmaxf(max_score, selected_scores[tk] / temperature);
+  }
+  float denom = 0.0f;
+  for (int tk = 0; tk < topk; tk++) {
+    selected_scores[tk] = expf(selected_scores[tk] / temperature - max_score);
+    denom += selected_scores[tk];
+  }
+
+  float cumsum = 0.0f;
+  int keep_len = 0;
+  for (int tk = 0; tk < topk; tk++) {
+    const float prob = selected_scores[tk] / denom;
+    cumsum += prob;
+    if (cumsum <= p) {
+      keep_len++;
+    }
+    selected_scores[tk] = prob;
+  }
+  if (keep_len < 1) keep_len = 1;
+  route_keep_len[row] = static_cast<int32_t>(keep_len);
+
+  const int64_t out_base = static_cast<int64_t>(row) * topk;
+  for (int tk = 0; tk < topk; tk++) {
+    const bool valid = tk < keep_len;
+    route_weight[out_base + tk] =
+        valid ? selected_scores[tk] * energy : 0.0f;
+    route_idx[out_base + tk] = valid ? selected_idx[tk] : 0;
+  }
 }
 
 __global__ void topp_route_nwin7_kernel_generic(
@@ -916,6 +1068,35 @@ void launch_generic<float>(torch::Tensor q_pix,
       n_win, height, width);
 }
 
+template <int QK_DIM>
+void launch_route_batch_nwin7(torch::Tensor query,
+                              torch::Tensor route_weight,
+                              torch::Tensor route_idx,
+                              torch::Tensor route_keep_len,
+                              torch::Tensor route_norm,
+                              torch::Tensor route_score,
+                              int64_t n,
+                              int64_t topk,
+                              float p,
+                              float temperature,
+                              float energy,
+                              float scale,
+                              cudaStream_t stream) {
+  const int norm_blocks = static_cast<int>(n * SPECIAL_P2);
+  const int score_blocks = static_cast<int>(n * SPECIAL_PAIR_COUNT);
+  const int select_blocks = static_cast<int>(n * SPECIAL_P2);
+  topp_route_norm_nwin7_kernel<QK_DIM><<<norm_blocks, WARP_SIZE, 0, stream>>>(
+      query.data_ptr<float>(), route_norm.data_ptr<float>(), n);
+  topp_route_score_nwin7_kernel<QK_DIM>
+      <<<score_blocks, WARP_SIZE, 0, stream>>>(
+          query.data_ptr<float>(), route_norm.data_ptr<float>(),
+          route_score.data_ptr<float>(), n, scale);
+  topp_route_select_nwin7_kernel<<<select_blocks, 1, 0, stream>>>(
+      route_score.data_ptr<float>(), route_weight.data_ptr<float>(),
+      route_idx.data_ptr<int32_t>(), route_keep_len.data_ptr<int32_t>(),
+      n, topk, p, temperature, energy);
+}
+
 template <typename scalar_t, int NUM_HEADS, int QUERY_TILE>
 void launch_special_tile(torch::Tensor q_pix,
                          torch::Tensor kv_pix,
@@ -1225,44 +1406,44 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
       {n, SPECIAL_P2}, query.options().dtype(torch::kInt));
 
   auto stream = at::cuda::getCurrentCUDAStream();
-  const int blocks = static_cast<int>(n * SPECIAL_P2);
   if (qk_dim == 64) {
-    topp_route_nwin7_kernel_fixed<64, 64><<<blocks, 64, 0, stream>>>(
-        query.data_ptr<float>(),
-        route_weight.data_ptr<float>(),
-        route_idx.data_ptr<int32_t>(),
-        route_keep_len.data_ptr<int32_t>(),
-        n, topk, static_cast<float>(p),
+    auto route_norm = torch::empty({n, SPECIAL_P2}, query.options());
+    auto route_score = torch::empty(
+        {n, SPECIAL_P2, SPECIAL_P2}, query.options());
+    launch_route_batch_nwin7<64>(
+        query, route_weight, route_idx, route_keep_len, route_norm,
+        route_score, n, topk, static_cast<float>(p),
         static_cast<float>(temperature), static_cast<float>(energy),
-        static_cast<float>(scale));
+        static_cast<float>(scale), stream);
   } else if (qk_dim == 128) {
-    topp_route_nwin7_kernel_fixed<128, 128><<<blocks, 128, 0, stream>>>(
-        query.data_ptr<float>(),
-        route_weight.data_ptr<float>(),
-        route_idx.data_ptr<int32_t>(),
-        route_keep_len.data_ptr<int32_t>(),
-        n, topk, static_cast<float>(p),
+    auto route_norm = torch::empty({n, SPECIAL_P2}, query.options());
+    auto route_score = torch::empty(
+        {n, SPECIAL_P2, SPECIAL_P2}, query.options());
+    launch_route_batch_nwin7<128>(
+        query, route_weight, route_idx, route_keep_len, route_norm,
+        route_score, n, topk, static_cast<float>(p),
         static_cast<float>(temperature), static_cast<float>(energy),
-        static_cast<float>(scale));
+        static_cast<float>(scale), stream);
   } else if (qk_dim == 256) {
-    topp_route_nwin7_kernel_fixed<256, 128><<<blocks, 128, 0, stream>>>(
-        query.data_ptr<float>(),
-        route_weight.data_ptr<float>(),
-        route_idx.data_ptr<int32_t>(),
-        route_keep_len.data_ptr<int32_t>(),
-        n, topk, static_cast<float>(p),
+    auto route_norm = torch::empty({n, SPECIAL_P2}, query.options());
+    auto route_score = torch::empty(
+        {n, SPECIAL_P2, SPECIAL_P2}, query.options());
+    launch_route_batch_nwin7<256>(
+        query, route_weight, route_idx, route_keep_len, route_norm,
+        route_score, n, topk, static_cast<float>(p),
         static_cast<float>(temperature), static_cast<float>(energy),
-        static_cast<float>(scale));
+        static_cast<float>(scale), stream);
   } else if (qk_dim == 512) {
-    topp_route_nwin7_kernel_fixed<512, 128><<<blocks, 128, 0, stream>>>(
-        query.data_ptr<float>(),
-        route_weight.data_ptr<float>(),
-        route_idx.data_ptr<int32_t>(),
-        route_keep_len.data_ptr<int32_t>(),
-        n, topk, static_cast<float>(p),
+    auto route_norm = torch::empty({n, SPECIAL_P2}, query.options());
+    auto route_score = torch::empty(
+        {n, SPECIAL_P2, SPECIAL_P2}, query.options());
+    launch_route_batch_nwin7<512>(
+        query, route_weight, route_idx, route_keep_len, route_norm,
+        route_score, n, topk, static_cast<float>(p),
         static_cast<float>(temperature), static_cast<float>(energy),
-        static_cast<float>(scale));
+        static_cast<float>(scale), stream);
   } else {
+    const int blocks = static_cast<int>(n * SPECIAL_P2);
     topp_route_nwin7_kernel_generic<<<blocks, ROUTE_THREADS, 0, stream>>>(
         query.data_ptr<float>(),
         route_weight.data_ptr<float>(),
