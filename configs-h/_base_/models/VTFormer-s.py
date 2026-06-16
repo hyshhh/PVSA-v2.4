@@ -69,11 +69,11 @@ model = dict(
         debug_route=False,
         side_dwconv=5,
         before_attn_dwconv=3,
-        layer_scale_init_value=-1,
+        layer_scale_init_value=1e-6,
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
-        # 训练默认使用硬路由选择，避免路由权重直接放大KV导致梯度尖峰。
-        param_routing=False, diff_routing=False, soft_routing=False,
+        # 使用软路由权重抑制被选窗口的整体幅度；配合layer scale稳定训练。
+        param_routing=False, diff_routing=False, soft_routing=True,
         pre_norm=True,
         pe=None,
         auto_pad=True,
