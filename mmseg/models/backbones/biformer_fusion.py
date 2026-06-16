@@ -60,7 +60,9 @@ def _log_topp_branch_stage_debug(stage, x_shape, cnn_shape, out_shape, times):
         return
     _TOPP_BRANCH_STAGE_LOGGED.add(key)
     parts = ' '.join(
-        f'{name}={elapsed:.4f}ms' for name, elapsed in times.items())
+        f'{name}={int(elapsed)}' if name == 'blocks'
+        else f'{name}={elapsed:.4f}ms'
+        for name, elapsed in times.items())
     print(
         '[PVSA TopP Stage] '
         f'path=backbone_fusion stage={stage} '
@@ -137,6 +139,7 @@ class BiFormer_fusion(VTFormer):
             default_feature_vis_config.update(feature_vis_config)
         self.feature_vis_config = default_feature_vis_config
         self._branch_inference_fused = False
+        self._parallel_branch_streams = {}
 
 
     def init_weights(self, pretrained=None):
@@ -194,7 +197,11 @@ class BiFormer_fusion(VTFormer):
                 return next_trans, next_cnn
 
             trans_stream = torch.cuda.current_stream(trans_x.device)
-            cnn_stream = torch.cuda.Stream(device=cnn_x.device)
+            stream_key = (cnn_x.device.type, cnn_x.device.index, stage_idx)
+            cnn_stream = self._parallel_branch_streams.get(stream_key)
+            if cnn_stream is None:
+                cnn_stream = torch.cuda.Stream(device=cnn_x.device)
+                self._parallel_branch_streams[stream_key] = cnn_stream
             with torch.cuda.stream(cnn_stream):
                 next_cnn = self.downsample_layers2[stage_idx](cnn_x)
             next_trans = self.downsample_layers[stage_idx](trans_x)
@@ -218,6 +225,7 @@ class BiFormer_fusion(VTFormer):
             _, stage_wall = _time_cuda_wall(
                 stage_profile, x, run_stage_body)
             if stage_wall is not None:
+                stage_times['blocks'] = float(len(self.stages[i]))
                 stage_times['stage_total_wall'] = stage_wall
             if feature_vis_enabled:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_before_FAM_x.png')
