@@ -222,17 +222,13 @@ class TopkRouting(nn.Module):
             if not self.diff_routing:
                 query = query.detach()
                 key = key.detach()
-            # 1️⃣ Linear embedding
-            # q = self.emb(query)    # (n, p2, c)
-            # k = self.emb(key)      # (n, p2, c)
-            q = F.normalize(query, dim=-1)
-            k = F.normalize(query, dim=-1)
+            q = F.normalize(self.emb(query), dim=-1)
+            k = F.normalize(self.emb(key), dim=-1)
             attn = (q * self.scale) @ k.transpose(-2, -1)   # (n, p2, p2)
-            # print(1)
         else:
             attn = GA
-            print("HH",attn[0][1])
-            print(2)
+            if self.debug_route:
+                print('[Route] using external GA attention map.')
         # 3️⃣ Top-k selection (no sorting for speed)
         topk_score, topk_index = torch.topk(
             attn, k=self.topk, dim=-1, sorted=True
@@ -260,10 +256,6 @@ class TopkRouting(nn.Module):
         # truncate to max_len
         topk_score = topk_score[..., :max_len]
         topk_index = topk_index[..., :max_len]
-        if self.flag==3 and self.topk==4:
-            print("第2",topk_score[0][0])
-            print("第2'",topk_index[0][0])
-
         # position mask
         pos = torch.arange(max_len, device=topk_score.device)
         valid_mask = pos[None, None, :] < keep_len
@@ -274,15 +266,6 @@ class TopkRouting(nn.Module):
 
         #能量补偿
         topk_score = topk_score * self.energy
-
-        if self.flag==4 and self.topk==4:
-            print("第3",topk_score[0][0])
-            print("第3",topk_index[0][0])
-
-        # 7️⃣ Final routing activation
-        # r_weight = self.routing_act(topk_score)
-        # if self.flag==0:
-        #     print("第4",r_weight[0][0])
 
         return topk_score, topk_index, valid_mask
 
@@ -440,7 +423,7 @@ class ToppAttention(nn.Module):
         self.topk = topk
         self.param_routing = param_routing
         self.diff_routing = diff_routing
-        self.soft_routing = True
+        self.soft_routing = soft_routing
         self.W=W
         # router
         assert not (self.param_routing and not self.diff_routing)  # cannot be with_param=True and diff_routing=False
@@ -497,11 +480,13 @@ class ToppAttention(nn.Module):
             # 1. kernel size should be input size dependent
             # 2. there is a random factor, need to avoid independent sampling for k and v
             raise NotImplementedError('fracpool policy is not implemented yet!')
-        elif kv_downsample_mode == 'conv':
+        elif self.kv_downsample_mode == 'conv':
             # TODO: need to consider the case where k != v so that need two downsample modules
             raise NotImplementedError('conv policy is not implemented yet!')
         else:
-            raise ValueError(f'kv_down_sample_mode {self.kv_downsaple_mode} is not surpported!')
+            raise ValueError(
+                f'kv_down_sample_mode {self.kv_downsample_mode} '
+                'is not supported!')
 
         # softmax for local attention
         self.attn_act = nn.Softmax(dim=-1)
@@ -598,12 +583,13 @@ class ToppAttention(nn.Module):
             full_route = (
                 self.qk_dim == 512 and self.dim == 512 and
                 self.n_win == 7 and self.router.topk == 49)
-            if can_run_topp_route_cuda(q_win, self.router.topk):
+            if can_run_topp_route_cuda(q_win, k_win, self.router.topk):
                 try:
                     r_weight, r_idx, keep_len = run_stage(
                         'router',
                         lambda: topp_route_cuda(
                             query=q_win,
+                            key=k_win,
                             topk=self.router.topk,
                             p=self.router.P,
                             temperature=self.router.Temperature,

@@ -14,7 +14,6 @@ import warnings
 import numpy as np
 import cv2 
 from PIL import Image
-import torch
 import torch.nn.functional as F
 
 
@@ -25,19 +24,6 @@ def _can_parallel_branches(x, cnn_x, stage_profile, feature_vis_enabled):
     return (not stage_profile and not feature_vis_enabled
             and torch.cuda.is_available() and x.is_cuda and cnn_x.is_cuda
             and x.device == cnn_x.device)
-
-
-def _time_cuda_stage(enabled, tensor, fn):
-    if not enabled or not torch.cuda.is_available() or not tensor.is_cuda:
-        return fn(), None
-    with torch.cuda.device(tensor.device):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        out = fn()
-        end.record()
-        end.synchronize()
-        return out, start.elapsed_time(end)
 
 
 def _time_cuda_wall(enabled, tensor, fn):
@@ -112,11 +98,12 @@ class BiFormer_fusion(VTFormer):
         self.bn = nn.ModuleList()
         self.conv12=nn.ModuleList()
         self.conv11=nn.ModuleList()
-        for i in range(4):
+        for i in range(3):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
             self.bn.append(nn.BatchNorm2d(self.embed_dim[i]))
             self.conv12.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
             self.conv11.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
+        self.extra_norms.append(LayerNorm2d(self.embed_dim[3]))
             
             
         self.apply(self._init_weights)

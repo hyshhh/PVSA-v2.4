@@ -48,6 +48,7 @@ __device__ __forceinline__ int64_t nhwc_offset(int64_t batch,
 template <int QK_DIM, int BLOCK_THREADS>
 __global__ void topp_route_nwin7_kernel_fixed(
     const float *__restrict__ query,
+    const float *__restrict__ key,
     float *__restrict__ route_weight,
     int32_t *__restrict__ route_idx,
     int32_t *__restrict__ route_keep_len,
@@ -114,7 +115,7 @@ __global__ void topp_route_nwin7_kernel_fixed(
     for (int d = 0; d < QK_DIM; d++)
     {
       const float qv = query[q_base + d];
-      const float kv = query[k_base + d];
+      const float kv = key[k_base + d];
       dot += qv * kv;
       k_norm += kv * kv;
     }
@@ -353,6 +354,7 @@ __global__ void topp_flash_head32_nwin7_kernel(
 
 template <int QK_DIM>
 void launch_route_batch_nwin7(torch::Tensor query,
+                              torch::Tensor key,
                               torch::Tensor route_weight,
                               torch::Tensor route_idx,
                               torch::Tensor route_keep_len,
@@ -369,9 +371,10 @@ void launch_route_batch_nwin7(torch::Tensor query,
   constexpr int ROUTE_BLOCK_THREADS = QK_DIM == 64 ? 64 : ROUTE_THREADS;
   topp_route_nwin7_kernel_fixed<QK_DIM, ROUTE_BLOCK_THREADS>
       <<<route_blocks, ROUTE_BLOCK_THREADS, 0, stream>>>(
-          query.data_ptr<float>(), route_weight.data_ptr<float>(),
-          route_idx.data_ptr<int32_t>(), route_keep_len.data_ptr<int32_t>(),
-          n, topk, p, temperature, energy, scale, full_route);
+          query.data_ptr<float>(), key.data_ptr<float>(),
+          route_weight.data_ptr<float>(), route_idx.data_ptr<int32_t>(),
+          route_keep_len.data_ptr<int32_t>(), n, topk, p, temperature,
+          energy, scale, full_route);
 }
 
 template <typename scalar_t, int NUM_HEADS, int QUERY_TILE>
@@ -546,6 +549,7 @@ torch::Tensor topp_flash_forward_cuda(torch::Tensor q_pix,
 }
 
 std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
+                                                   torch::Tensor key,
                                                    int64_t topk,
                                                    double p,
                                                    double temperature,
@@ -555,6 +559,10 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
 {
   TORCH_CHECK(query.scalar_type() == torch::kFloat32,
               "route query must be float32");
+  TORCH_CHECK(key.scalar_type() == query.scalar_type(),
+              "route key must have the same dtype as query");
+  TORCH_CHECK(key.sizes() == query.sizes(),
+              "route key must have the same shape as query");
   TORCH_CHECK(query.size(1) == SPECIAL_P2, "route query p2 must be 49");
   TORCH_CHECK(topk > 0 && topk <= SPECIAL_MAX_TOPK,
               "route topk must be in [1, 49]");
@@ -572,7 +580,7 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
   if (qk_dim == 64)
   {
     launch_route_batch_nwin7<64>(
-        query, route_weight, route_idx, route_keep_len, n, topk,
+        query, key, route_weight, route_idx, route_keep_len, n, topk,
         static_cast<float>(p), static_cast<float>(temperature),
         static_cast<float>(energy), static_cast<float>(scale),
         full_route, stream);
@@ -580,7 +588,7 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
   else if (qk_dim == 128)
   {
     launch_route_batch_nwin7<128>(
-        query, route_weight, route_idx, route_keep_len, n, topk,
+        query, key, route_weight, route_idx, route_keep_len, n, topk,
         static_cast<float>(p), static_cast<float>(temperature),
         static_cast<float>(energy), static_cast<float>(scale),
         full_route, stream);
@@ -588,7 +596,7 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
   else if (qk_dim == 256)
   {
     launch_route_batch_nwin7<256>(
-        query, route_weight, route_idx, route_keep_len, n, topk,
+        query, key, route_weight, route_idx, route_keep_len, n, topk,
         static_cast<float>(p), static_cast<float>(temperature),
         static_cast<float>(energy), static_cast<float>(scale),
         full_route, stream);
@@ -596,7 +604,7 @@ std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
   else if (qk_dim == 512)
   {
     launch_route_batch_nwin7<512>(
-        query, route_weight, route_idx, route_keep_len, n, topk,
+        query, key, route_weight, route_idx, route_keep_len, n, topk,
         static_cast<float>(p), static_cast<float>(temperature),
         static_cast<float>(energy), static_cast<float>(scale),
         full_route, stream);

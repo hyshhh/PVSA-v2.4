@@ -136,20 +136,7 @@ def _fuse_sequential_conv_bn(module):
 def get_pe_layer(emb_dim, pe_dim=None, name='none'):
     if name == 'none':
         return nn.Identity()
-    # if name == 'sum':
-    #     return Summer(PositionalEncodingPermute2D(emb_dim))
-    # elif name == 'npe.sin':
-    #     return NeuralPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='sin')
-    # elif name == 'npe.coord':
-    #     return NeuralPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='coord')
-    # elif name == 'hpe.conv':
-    #     return HybridPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='conv', res_shortcut=True)
-    # elif name == 'hpe.dsconv':
-    #     return HybridPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='dsconv', res_shortcut=True)
-    # elif name == 'hpe.pointconv':
-    #     return HybridPE(emb_dim=emb_dim, pe_dim=pe_dim, mode='pointconv', res_shortcut=True)
-    else:
-        raise ValueError(f'PE name {name} is not surpported!')
+    raise ValueError(f'PE name {name} is not supported!')
 
 class Block(nn.Module):
     def __init__(self, dim, drop_path=0., layer_scale_init_value=-1,
@@ -177,6 +164,7 @@ class Block(nn.Module):
         else:
             self.pos_embed = lambda x: 0
         if topk > 0:
+            self.use_topp_attention = True
             self.PA = ToppAttention(dim=dim, num_heads=num_heads,n_win=n_win, qk_dim=qk_dim,
                                                 qk_scale=qk_scale, kv_per_win=kv_per_win,
                                                 kv_downsample_ratio=kv_downsample_ratio,
@@ -196,16 +184,21 @@ class Block(nn.Module):
                                                 debug_route=debug_route,
                                                 topp_flash_debug=topp_flash_debug)
         elif topk == -1:
+            self.use_topp_attention = False
             self.attn = Attention(dim=dim)
         elif topk == -2:
+            self.use_topp_attention = False
             self.attn = AttentionLePE(dim=dim, side_dwconv=side_dwconv)
         elif topk == 0:
+            self.use_topp_attention = False
             self.attn = nn.Sequential(Rearrange('n h w c -> n c h w'),  # compatiability
                                       nn.Conv2d(dim, dim, 1),  # pseudo qkv linear
                                       nn.Conv2d(dim, dim, 5, padding=2, groups=dim),  # pseudo attention
                                       nn.Conv2d(dim, dim, 1),  # pseudo out linear
                                       Rearrange('n c h w -> n h w c')
                                       )
+        else:
+            raise ValueError(f'Unsupported topk value: {topk}')
         self.norm1 = nn.LayerNorm(dim, eps=1e-6)  # important to avoid attention collapsing
         self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         self.norm3 = nn.LayerNorm(dim, eps=1e-6)
@@ -230,7 +223,13 @@ class Block(nn.Module):
         else:
             self.use_layer_scale = False
         self.pre_norm = pre_norm
-        
+
+
+    def _scale_attn(self, x):
+        return self.gamma1 * x if self.use_layer_scale else x
+
+    def _scale_mlp(self, x):
+        return self.gamma2 * x if self.use_layer_scale else x
 
     def forward(self, x):
         """
@@ -238,10 +237,19 @@ class Block(nn.Module):
         """
         x = x + self.pos_embed(x)
         x = x.permute(0, 2, 3, 1)
-        PA = self.PA(self.norm3(x), None)
+        attn_norm = self.norm3 if self.use_topp_attention else self.norm1
+        mlp_norm = self.norm4 if self.use_topp_attention else self.norm2
+        if self.use_topp_attention:
+            attn_fn = lambda tensor: self.PA(tensor, None)
+        else:
+            attn_fn = self.attn
         if self.pre_norm:
-            x = x + self.drop_path(PA)
-            x = x + self.drop_path(self.mlp2(self.norm4(x)))
+            attn_out = attn_fn(attn_norm(x))
+            x = x + self.drop_path(self._scale_attn(attn_out))
+            x = x + self.drop_path(self._scale_mlp(self.mlp2(mlp_norm(x))))
+        else:
+            x = attn_norm(x + self.drop_path(self._scale_attn(attn_fn(x))))
+            x = mlp_norm(x + self.drop_path(self._scale_mlp(self.mlp2(x))))
         x = x.permute(0, 3, 1, 2)
         return x
 
@@ -491,29 +499,6 @@ class SpatialWeights(nn.Module):
         x = fused if fused is not None else torch.cat((x1, x2), dim=1)
         spatial_weights = self.mlp(x).reshape(B, 2, 1, H, W).permute(1, 0, 2, 3, 4)
         return spatial_weights
-class Stem224(nn.Module):
-    def __init__(self, in_chans=3, embed_dim=128):
-        super().__init__()
-        self.conv1 = DepthWiseConvModule(
-            in_chans, embed_dim // 2, embed_dim // 2, kernel_size=3, stride=2, padding=1)
-        self.bn1 = nn.BatchNorm2d(embed_dim // 2)
-        self.act1 = nn.GELU()
-
-        self.conv2 = DepthWiseConvModule(
-            embed_dim // 2, embed_dim // 2, embed_dim, kernel_size=3, stride=2, padding=1)
-        self.bn2 = nn.BatchNorm2d(embed_dim)
-        self.act2 = nn.GELU()
-
-        self.shortcut = nn.Sequential(
-            nn.Conv2d(in_chans, embed_dim, 1, stride=4),  # 下采样 + 对齐通道
-            nn.BatchNorm2d(embed_dim)
-        )
-
-    def forward(self, x):
-        out = self.act1(self.bn1(self.conv1(x)))
-        out = self.act2(self.bn2(self.conv2(out)))
-        out += self.shortcut(x)
-        return out
 @MODELS.register_module()
 class VTFormer(nn.Module):
     def __init__(self,depth=[3, 4, 8, 3], in_chans=3, num_classes=1000, embed_dim=[64, 128, 320, 512],
@@ -579,8 +564,6 @@ class VTFormer(nn.Module):
         self.downsample_layers = nn.ModuleList()
         self.downsample_layers2 = nn.ModuleList()
         self.FAM = nn.ModuleList()
-        self.DWconv=nn.ModuleList()
-        # self.pool_layers = nn.ModuleList()
 
 
 
@@ -641,14 +624,11 @@ class VTFormer(nn.Module):
             if (pe is not None) and i + 1 in pe_stages:
                 downsample_layer.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
                 downsample_layer2.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
-                # pool1.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
             if use_checkpoint_stages:
                 downsample_layer = checkpoint_wrapper(downsample_layer)
                 downsample_layer2 = checkpoint_wrapper(downsample_layer2)
-                # pool1= checkpoint_wrapper(pool1)
             self.downsample_layers.append(downsample_layer)
             self.downsample_layers2.append(downsample_layer2)
-            # self.pool_layers.append(pool1)
             self.fusion.append(
             nn.Conv2d(2*embed_dim[i + 1], embed_dim[i + 1], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
             )

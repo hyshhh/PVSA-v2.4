@@ -65,7 +65,8 @@ model = dict(
         layer_scale_init_value=-1,
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
-        param_routing=False, diff_routing=False, soft_routing=False,
+        # 旧实现实际强制启用了soft routing；这里显式写出，避免配置和运行行为不一致。
+        param_routing=False, diff_routing=False, soft_routing=True,
         pre_norm=True,
         pe=None,
         auto_pad=True,

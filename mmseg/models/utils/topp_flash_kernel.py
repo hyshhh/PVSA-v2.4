@@ -44,6 +44,7 @@ def is_topp_flash_available(backend: Optional[str] = None) -> bool:
 
 
 def topp_route_cuda(query: Tensor,
+                    key: Tensor,
                     topk: int,
                     p: float,
                     temperature: float,
@@ -65,22 +66,24 @@ def topp_route_cuda(query: Tensor,
     def run_route():
         extension = _load_cuda_extension()
         return tuple(extension.route_forward(
-            query.contiguous(), int(topk), float(p), float(temperature),
-            float(energy), float(scale), bool(full_route)))
+            query.contiguous(), key.contiguous(), int(topk), float(p),
+            float(temperature), float(energy), float(scale),
+            bool(full_route)))
 
     return _maybe_time_debug(debug, debug_key, debug_path, query, run_route)
 
 
-def can_run_topp_route_cuda(query: Tensor, topk: int) -> bool:
+def can_run_topp_route_cuda(query: Tensor, key: Tensor, topk: int) -> bool:
     if os.getenv('PVSA_TOPP_ROUTE_CUDA', '1') != '1':
         return False
     if not _can_build_cuda_extension():
         return False
-    if query.requires_grad:
+    if query.requires_grad or key.requires_grad:
         return False
-    return (query.is_cuda and query.dtype == torch.float32 and
-            query.dim() == 3 and query.size(1) == 49 and
-            query.size(2) in (64, 128, 256, 512) and
+    return (query.is_cuda and key.is_cuda and query.device == key.device and
+            query.dtype == torch.float32 and key.dtype == query.dtype and
+            query.shape == key.shape and query.dim() == 3 and
+            query.size(1) == 49 and query.size(2) in (64, 128, 256, 512) and
             0 < int(topk) <= 49)
 
 
