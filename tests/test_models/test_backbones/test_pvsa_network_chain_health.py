@@ -78,15 +78,21 @@ def test_fusion_and_route_mechanism_options_are_configurable():
     ).read_text(encoding='utf-8')
 
     assert 'fam_stages=(0, 1, 2, 3)' in backbone
+    assert "mask_source='branch_low'" in backbone
+    assert "mask_source must be one of 'branch_low' or 'fused_low'." in backbone
     assert 'route_pooling=' in backbone
     assert 'if i in self.fam_stages:' in fusion
     assert 'self.bn11 = nn.ModuleList()' in fusion
     assert 'self.bn12 = nn.ModuleList()' in fusion
-    assert 'self.conv11[i](channel1[i + 1])' in fusion
-    assert 'self.conv12[i](channel2[i + 1])' in fusion
+    assert "if self.mask_source == 'branch_low':" in fusion
+    assert 'mask_source1 = channel1[i]' in fusion
+    assert 'mask_source2 = channel2[i]' in fusion
+    assert 'mask_source1 = channel3[i]' in fusion
+    assert 'mask_source2 = channel3[i]' in fusion
     assert "route_pooling must be one of 'avg', 'max', or 'avgmax'." in route
     assert 'q_route = 0.5 * (q.mean([2, 3]) + q.amax(dim=(2, 3)))' in route
     assert 'fam_stages=[0, 1, 2, 3]' in model_cfg
+    assert "mask_source='branch_low'" in model_cfg
     assert "route_pooling='avgmax'" in model_cfg
     assert 'img_scale = (224, 224)' in dataset_cfg
     assert 'crop_size = (224, 224)' in dataset_cfg

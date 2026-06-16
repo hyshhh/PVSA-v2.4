@@ -103,21 +103,14 @@ class BiFormer_fusion(VTFormer):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
             self.bn11.append(nn.BatchNorm2d(self.embed_dim[i]))
             self.bn12.append(nn.BatchNorm2d(self.embed_dim[i]))
-            self.conv12.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
-            self.conv11.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
+            self.conv12.append(nn.Conv2d(self.embed_dim[i],self.embed_dim[i],1,1,0))
+            self.conv11.append(nn.Conv2d(self.embed_dim[i],self.embed_dim[i],1,1,0))
         self.extra_norms.append(LayerNorm2d(self.embed_dim[3]))
             
             
         self.apply(self._init_weights)
         self.init_weights(pretrained=pretrained)
         nn.SyncBatchNorm.convert_sync_batchnorm(self)
-        self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        # self.upsample4 = nn.Upsample(scale_factor=4, mode='bilinear', align_corners=False)
-        # self.upsample8 = nn.Upsample(scale_factor=8, mode='bilinear', align_corners=False)
-        # self.pool2=nn.AvgPool2d(kernel_size=2, stride=2)
-        # self.pool4=nn.AvgPool2d(kernel_size=4, stride=4)
-        # self.pool8=nn.AvgPool2d(kernel_size=8, stride=8)
-        # self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
         self.sigmoid = nn.Sigmoid()
         default_feature_vis_config = dict(
             enabled=False,
@@ -248,12 +241,18 @@ class BiFormer_fusion(VTFormer):
                     stage_times)
         for i in range(3):
             stage_times = {}
+            if self.mask_source == 'branch_low':
+                mask_source1 = channel1[i]
+                mask_source2 = channel2[i]
+            else:
+                mask_source1 = channel3[i]
+                mask_source2 = channel3[i]
             C1 = _run_with_optional_wall_time(
-                stage_profile, channel1[i + 1], stage_times, 'mask_conv1',
-                lambda i=i: self.conv11[i](channel1[i + 1]))
+                stage_profile, mask_source1, stage_times, 'mask_conv1',
+                lambda i=i: self.conv11[i](mask_source1))
             C2 = _run_with_optional_wall_time(
-                stage_profile, channel2[i + 1], stage_times, 'mask_conv2',
-                lambda i=i: self.conv12[i](channel2[i + 1]))
+                stage_profile, mask_source2, stage_times, 'mask_conv2',
+                lambda i=i: self.conv12[i](mask_source2))
             bn_channel1 = _run_with_optional_wall_time(
                 stage_profile, C1, stage_times, 'mask_bn1',
                 lambda i=i: self.sigmoid(self.bn11[i](C1)))
@@ -261,17 +260,16 @@ class BiFormer_fusion(VTFormer):
                 stage_profile, C2, stage_times, 'mask_bn2',
                 lambda i=i: self.sigmoid(self.bn12[i](C2)))
             if feature_vis_enabled and i==0:
-                self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{save_dir}/mask1.png')
-                self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
+                self._save_feature_channel_as_image(bn_channel1, f'{save_dir}/mask1.png')
+                self._save_feature_channel_as_image(bn_channel2, f'{save_dir}/mask2.png')
             channel3[i] = _run_with_optional_wall_time(
                 stage_profile, channel3[i], stage_times, 'mask_fusion',
                 lambda i=i: channel3[i] * (
-                    1 + self.upsample2(bn_channel1) +
-                    self.upsample2(bn_channel2)))
+                    1 + bn_channel1 + bn_channel2))
             if stage_times:
                 _log_topp_branch_stage_debug(
-                    f'mask{i}', tuple(channel1[i + 1].shape),
-                    tuple(channel2[i + 1].shape), tuple(channel3[i].shape),
+                    f'mask{i}', tuple(mask_source1.shape),
+                    tuple(mask_source2.shape), tuple(channel3[i].shape),
                     stage_times)
 
         for i in range(4):

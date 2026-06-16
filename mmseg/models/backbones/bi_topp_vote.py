@@ -538,6 +538,7 @@ class VTFormer(nn.Module):
                  stage_archs=None,
                  extra_block_type=None,
                  fam_stages=(0, 1, 2, 3),
+                 mask_source='branch_low',
                  transformer_branch_depth=None,
                  cnn_branch_depth=None,
                  route_pooling='avgmax',
@@ -562,6 +563,10 @@ class VTFormer(nn.Module):
             raise ValueError(
                 f'fam_stages values must be in [0, 3], got '
                 f'{invalid_fam_stages}.')
+        self.mask_source = str(mask_source).strip().lower()
+        if self.mask_source not in ('branch_low', 'fused_low'):
+            raise ValueError(
+                "mask_source must be one of 'branch_low' or 'fused_low'.")
         self.route_pooling = route_pooling
         self.stage_archs = _normalize_stage_archs(
             stage_archs, depth, transformer_branch_depth, cnn_branch_depth,

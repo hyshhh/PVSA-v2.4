@@ -42,6 +42,9 @@ model = dict(
         n_win=7,
         # 可选FAM融合层。默认四层都融合；例如只融合第一层可写成[0]。
         fam_stages=[0, 1, 2, 3],
+        # mask_source='branch_low'：当前低层Transformer/CNN分别生成mask；
+        # mask_source='fused_low'：当前低层融合特征channel3生成mask。
+        mask_source='branch_low',
         # 路由窗口特征池化方式：avg为旧版均值池化，avgmax融合均值和最大响应。
         route_pooling='avgmax',
         kv_downsample_mode='identity',
