@@ -58,6 +58,8 @@ model = dict(
         use_topp_flash=True,
         topp_flash_backend='cuda',
         topp_flash_block_windows=16,
+        # 打开后打印 PVSA TopP Stage，包括 Transformer、Router kernel、
+        # Flash kernel、CNN 分支和融合模块耗时。
         topp_flash_debug=False,
         use_pruned_kv_gather=False,
         # pruned_kv_gather 粗分桶数量。按 keep_len 范围切成 N 个桶，

@@ -14,6 +14,37 @@ import cv2
 from PIL import Image
 import torch
 import torch.nn.functional as F
+
+
+_TOPP_BRANCH_STAGE_LOGGED = set()
+
+
+def _time_cuda_stage(enabled, tensor, fn):
+    if not enabled or not torch.cuda.is_available() or not tensor.is_cuda:
+        return fn(), None
+    with torch.cuda.device(tensor.device):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        out = fn()
+        end.record()
+        end.synchronize()
+        return out, start.elapsed_time(end)
+
+
+def _log_topp_branch_stage_debug(stage, x_shape, cnn_shape, out_shape, times):
+    key = (stage, x_shape, cnn_shape, out_shape)
+    if key in _TOPP_BRANCH_STAGE_LOGGED:
+        return
+    _TOPP_BRANCH_STAGE_LOGGED.add(key)
+    parts = ' '.join(
+        f'{name}={elapsed:.4f}ms' for name, elapsed in times.items())
+    print(
+        '[PVSA TopP Stage] '
+        f'path=backbone_fusion stage={stage} '
+        f'x={x_shape} cnn={cnn_shape} out={out_shape} {parts}')
+
+
 @MODELS.register_module()
 class BiFormer_fusion(VTFormer):
     def __init__(self,
@@ -48,6 +79,7 @@ class BiFormer_fusion(VTFormer):
                 warnings.warn(
                     '当前 VTFormer 不支持 Top-P Flash 参数，已降级为普通注意力路径。')
             super().__init__(**kwargs)
+        self.topp_flash_debug = topp_flash_debug
         self.extra_norms = nn.ModuleList()
         self.bn = nn.ModuleList()
         self.conv12=nn.ModuleList()
@@ -101,6 +133,7 @@ class BiFormer_fusion(VTFormer):
     def forward_features(self, x: torch.Tensor):
         out = []
         cnn_encoder_out = x
+        stage_profile = self.topp_flash_debug
 
         feature_vis_enabled = self.feature_vis_config.get('enabled', False)
         save_dir = self.feature_vis_config.get('save_dir', 'cam/features_imgs4')
@@ -109,40 +142,98 @@ class BiFormer_fusion(VTFormer):
         channel1=[]
         channel2=[]
         channel3=[]
+
+        def run_stage_timer(times, name, tensor, fn):
+            result, elapsed = _time_cuda_stage(stage_profile, tensor, fn)
+            if elapsed is not None:
+                times[name] = elapsed
+            return result
+
         for i in range(4):
+            stage_times = {}
+            stage_input_shape = tuple(x.shape)
             if feature_vis_enabled:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_xinput.png')
-            cnn_encoder_out = self.downsample_layers2[i](cnn_encoder_out)
-            x = self.downsample_layers[i](x)
-            x = self.stages[i](x)
+            cnn_encoder_out = run_stage_timer(
+                stage_times, 'cnn_branch', cnn_encoder_out,
+                lambda i=i: self.downsample_layers2[i](cnn_encoder_out))
+            x = run_stage_timer(
+                stage_times, 'trans_down', x,
+                lambda i=i: self.downsample_layers[i](x))
+            x = run_stage_timer(
+                stage_times, 'trans_stage', x,
+                lambda i=i: self.stages[i](x))
             if feature_vis_enabled:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_before_FAM_x.png')
                 self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_before_FAM_cnn.png')
 
-            x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)
+            x, cnn_encoder_out = run_stage_timer(
+                stage_times, 'fam', x,
+                lambda i=i: self.FAM[i](x, cnn_encoder_out))
             channel1.append(x)
             channel2.append(cnn_encoder_out)
 
             if feature_vis_enabled:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_after_FAM_x.png')
                 self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_after_FAM_cnn.png')
+            if stage_times:
+                _log_topp_branch_stage_debug(
+                    i, stage_input_shape, tuple(cnn_encoder_out.shape),
+                    tuple(x.shape), stage_times)
 
         for i in range(4):
-            channel3.append(self.fusion[i](torch.cat((channel1[i], channel2[i]), dim=1)))  # dim=1 表示按通道拼接
+            stage_times = {}
+            fused = run_stage_timer(
+                stage_times, 'fusion_conv', channel1[i],
+                lambda i=i: self.fusion[i](
+                    torch.cat((channel1[i], channel2[i]), dim=1)))
+            channel3.append(fused)  # dim=1 表示按通道拼接
+            if stage_times:
+                _log_topp_branch_stage_debug(
+                    f'fusion{i}', tuple(channel1[i].shape),
+                    tuple(channel2[i].shape), tuple(fused.shape),
+                    stage_times)
         for i in range(3):
-            C1=self.conv11[i](channel1[i + 1])
-            C2=self.conv12[i](channel1[i + 1])
-            bn_channel1 = self.sigmoid(self.bn[i](C1))
-            bn_channel2 = self.sigmoid(self.bn[i](C2))
+            stage_times = {}
+            C1 = run_stage_timer(
+                stage_times, 'mask_conv1', channel1[i + 1],
+                lambda i=i: self.conv11[i](channel1[i + 1]))
+            C2 = run_stage_timer(
+                stage_times, 'mask_conv2', channel1[i + 1],
+                lambda i=i: self.conv12[i](channel1[i + 1]))
+            bn_channel1 = run_stage_timer(
+                stage_times, 'mask_bn1', C1,
+                lambda i=i: self.sigmoid(self.bn[i](C1)))
+            bn_channel2 = run_stage_timer(
+                stage_times, 'mask_bn2', C2,
+                lambda i=i: self.sigmoid(self.bn[i](C2)))
             if feature_vis_enabled and i==0:
                 self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{save_dir}/mask1.png')
                 self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
-            channel3[i] = channel3[i] + self.upsample2(bn_channel1) * channel3[i] + self.upsample2(bn_channel2) * channel3[i]
-        
+            channel3[i] = run_stage_timer(
+                stage_times, 'mask_fusion', channel3[i],
+                lambda i=i: channel3[i] +
+                self.upsample2(bn_channel1) * channel3[i] +
+                self.upsample2(bn_channel2) * channel3[i])
+            if stage_times:
+                _log_topp_branch_stage_debug(
+                    f'mask{i}', tuple(channel1[i + 1].shape),
+                    tuple(channel3[i].shape), tuple(channel3[i].shape),
+                    stage_times)
+
         for i in range(4):
             if feature_vis_enabled:
                 self._save_feature_channel_as_image(channel3[i], f'{save_dir}/stage{i}_after_channel.png')
-            out.append(self.extra_norms[i](channel3[i]))
+            stage_times = {}
+            normed = run_stage_timer(
+                stage_times, 'out_norm', channel3[i],
+                lambda i=i: self.extra_norms[i](channel3[i]))
+            out.append(normed)
+            if stage_times:
+                _log_topp_branch_stage_debug(
+                    f'out{i}', tuple(channel3[i].shape),
+                    tuple(channel3[i].shape), tuple(normed.shape),
+                    stage_times)
         return tuple(out)
 
 
