@@ -49,10 +49,6 @@ def _time_cuda_stage(enabled: bool, tensor: Tensor, fn):
         return out, start.elapsed_time(end)
 
 
-def _profile_topp_stage() -> bool:
-    return os.getenv('PVSA_TOPP_STAGE_PROFILE', '1') == '1'
-
-
 def _log_topp_stage_debug(path: str, x: Tensor, q_pix: Tensor, kv_pix: Tensor,
                           r_idx: Tensor, times: Dict[str, float],
                           num_heads: int, qk_dim: int, dim: int,
@@ -522,7 +518,7 @@ class ToppAttention(nn.Module):
             assert H % self.n_win == 0 and W % self.n_win == 0  #
         ###################################################
         stage_debug = self.topp_flash_debug and not ret_attn_mask
-        stage_profile = stage_debug and _profile_topp_stage()
+        stage_profile = stage_debug
         stage_times = {}
 
         def run_stage(name, fn):
@@ -593,7 +589,8 @@ class ToppAttention(nn.Module):
                             p=self.router.P,
                             temperature=self.router.Temperature,
                             energy=self.router.energy,
-                            scale=self.router.scale))
+                            scale=self.router.scale,
+                            debug=self.topp_flash_debug))
                     r_mask = None
                 except Exception as exc:
                     warn_topp_route_cuda_fallback(str(exc))

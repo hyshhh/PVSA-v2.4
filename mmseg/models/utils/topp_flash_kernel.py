@@ -46,16 +46,26 @@ def topp_route_cuda(query: Tensor,
                     p: float,
                     temperature: float,
                     energy: float,
-                    scale: float) -> Tuple[Tensor, Tensor, Tensor]:
+                    scale: float,
+                    debug: bool = False) -> Tuple[Tensor, Tensor, Tensor]:
     """CUDA route kernel for fixed 7x7 windows.
 
     Returns:
         route_weight, route_idx, keep_len
     """
-    extension = _load_cuda_extension()
-    return tuple(extension.route_forward(
-        query.contiguous(), int(topk), float(p), float(temperature),
-        float(energy), float(scale)))
+    debug_key = None
+    debug_path = 'cuda_route'
+    if debug:
+        debug_key = _log_topp_route_debug(
+            query, topk, p, temperature, energy, scale)
+
+    def run_route():
+        extension = _load_cuda_extension()
+        return tuple(extension.route_forward(
+            query.contiguous(), int(topk), float(p), float(temperature),
+            float(energy), float(scale)))
+
+    return _maybe_time_debug(debug, debug_key, debug_path, query, run_route)
 
 
 def topp_flash_fused_attention(route_query: Tensor,
@@ -390,19 +400,38 @@ def _log_topp_fused_debug(route_query: Tensor, q_pix: Tensor, kv_pix: Tensor,
     return key
 
 
+def _log_topp_route_debug(query: Tensor, topk: int, p: float,
+                          temperature: float, energy: float,
+                          scale: float) -> tuple:
+    can_build = _can_build_cuda_extension()
+    can_run = can_run_topp_route_cuda(query, topk)
+    path = 'cuda_route'
+    key = (
+        path, str(query.dtype), tuple(query.shape), int(topk), float(p),
+        float(temperature), float(energy), float(scale))
+    if key in _CUDA_DEBUG_LOGGED:
+        return key
+    _CUDA_DEBUG_LOGGED.add(key)
+    print(
+        '[PVSA TopP Route] '
+        f'backend=cuda path={path} build={can_build} can_run={can_run} '
+        f'dtype={query.dtype} q={tuple(query.shape)} topk={topk} '
+        f'p={p} temperature={temperature} energy={energy} scale={scale}')
+    return key
+
+
 def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
                       debug_path: Optional[str], timing_tensor: Tensor,
                       runner):
-    if (not debug or not _profile_topp_flash() or debug_key is None or
-            debug_key in _CUDA_TIMING_LOGGED):
+    if not debug or debug_key is None or debug_key in _CUDA_TIMING_LOGGED:
         return runner()
     if not torch.cuda.is_available() or not timing_tensor.is_cuda:
         return runner()
     _CUDA_TIMING_LOGGED.add(debug_key)
-    if debug_path in ('cuda_specialized', 'cuda_generic'):
+    if debug_path in ('cuda_specialized', 'cuda_generic', 'cuda_route'):
         _load_cuda_extension()
-    repeat = max(1, int(os.getenv('PVSA_TOPP_FLASH_TIMING_REPEAT', '5')))
-    warmup = max(0, int(os.getenv('PVSA_TOPP_FLASH_TIMING_WARMUP', '2')))
+    repeat = 5
+    warmup = 2
     out = None
     with torch.cuda.device(timing_tensor.device):
         for _ in range(warmup):
@@ -416,15 +445,16 @@ def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
         end.record()
         end.synchronize()
         elapsed_ms = start.elapsed_time(end) / repeat
+    label = 'Flash kernel'
+    if debug_path == 'cuda_route':
+        label = 'Router kernel'
+    elif debug_path == 'torch_block':
+        label = 'Torch block'
     print(
         '[PVSA TopP Flash] '
-        f'timing path={debug_path} elapsed_ms={elapsed_ms:.4f} '
+        f'{label} path={debug_path} elapsed_ms={elapsed_ms:.4f} '
         f'warmup={warmup} repeat={repeat}')
     return out
-
-
-def _profile_topp_flash() -> bool:
-    return os.getenv('PVSA_TOPP_FLASH_PROFILE', '1') == '1'
 
 
 def _keep_len_to_mask(keep_len: Tensor, topk: int) -> Tensor:
