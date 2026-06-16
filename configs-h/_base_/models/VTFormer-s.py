@@ -60,8 +60,8 @@ model = dict(
         # energy 表示裁剪后的能量补偿系数。
         # 测试不同 maxk/p 时，直接修改这里的值，不要用 --cfg-options（无法覆盖整数键）
         topp_route_configs={
-            16: dict(maxk=25, p=0.2, temperature=0.0175, energy=4.0),
-            12: dict(maxk=18, p=0.4, temperature=0.025, energy=1.5),
+            16: dict(maxk=25, p=0.2, temperature=0.0175, energy=1.0),
+            12: dict(maxk=18, p=0.4, temperature=0.025, energy=1.0),
             8: dict(maxk=36, p=0.6, temperature=0.05, energy=0.75),
             6: dict(maxk=49, p=0.8, temperature=0.15, energy=0.4),
         },
