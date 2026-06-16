@@ -41,6 +41,20 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
 
 打印各环节时间时，只把 `model.backbone.topp_flash_debug` 改成 `True`。
 
+最后一层改成 49 窗口全连接注意力评估：
+```bash
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-V2.2:$PYTHONPATH
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
+  --cfg-options model.backbone.use_topp_flash=True \
+  model.backbone.topp_flash_backend=cuda \
+  model.backbone.topp_flash_debug=True \
+  model.backbone.topp_flash_full_last_stage=True
+```
+
 PyTorch 后端示例：
 ```bash
 export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-V2.2:$PYTHONPATH
