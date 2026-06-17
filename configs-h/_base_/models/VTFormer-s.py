@@ -42,6 +42,9 @@ model = dict(
         n_win=7,
         # 可选FAM融合层。例如只融合第一层可写成[0]；空列表表示不用FAM。
         fam_stages=[],
+        # FAM强度默认保守，避免跨分支对齐一开始带来大梯度。
+        fam_lambda=0.1,
+        fam_gate_scale=1e-3,
         # 可选投票融合层。某个stage不在fusion_stages里时，直接用逐元素相加融合。
         # 如果某个stage同时不在fam_stages和fusion_stages里，就是两分支直接相加。
         fusion_stages=[0, 1, 2],

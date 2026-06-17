@@ -256,10 +256,12 @@ class Block(nn.Module):
         return x
 
 class FeatureAlignmentModule(nn.Module):
-    def __init__(self, dim, reduction=4, lambda_c=.5, lambda_s=.5):
+    def __init__(self, dim, reduction=4, lambda_c=.1, lambda_s=.1,
+                 gate_scale=1e-3):
         super(FeatureAlignmentModule, self).__init__()
         self.lambda_c = lambda_c
         self.lambda_s = lambda_s
+        self.gate_scale = gate_scale
         self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
         self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
         self.channel_gate = nn.Parameter(torch.zeros(1))
@@ -283,8 +285,10 @@ class FeatureAlignmentModule(nn.Module):
     def forward(self, x1, x2):
         channel_weights = self.channel_weights(x1, x2)
         spatial_weights = self.spatial_weights(x1, x2)
-        channel_scale = self.lambda_c * torch.tanh(self.channel_gate)
-        spatial_scale = self.lambda_s * torch.tanh(self.spatial_gate)
+        channel_scale = (
+            self.lambda_c * torch.tanh(self.channel_gate) * self.gate_scale)
+        spatial_scale = (
+            self.lambda_s * torch.tanh(self.spatial_gate) * self.gate_scale)
         mix12 = channel_scale * channel_weights[1] + spatial_scale * spatial_weights[1]
         mix21 = channel_scale * channel_weights[0] + spatial_scale * spatial_weights[0]
         out_x1 = x1 + mix12.clamp(-1.0, 1.0) * (x2 - x1)
@@ -551,6 +555,8 @@ class VTFormer(nn.Module):
                  stage_archs=None,
                  extra_block_type=None,
                  fam_stages=(0, 1, 2, 3),
+                 fam_lambda=0.1,
+                 fam_gate_scale=1e-3,
                  fusion_stages=(0, 1, 2, 3),
                  mask_source='branch_low',
                  transformer_branch_depth=None,
@@ -571,6 +577,8 @@ class VTFormer(nn.Module):
         self.topp_flash_debug = topp_flash_debug
         self.fam_stages = self._normalize_stage_indices(
             fam_stages, 'fam_stages')
+        self.fam_lambda = float(fam_lambda)
+        self.fam_gate_scale = float(fam_gate_scale)
         self.fusion_stages = self._normalize_stage_indices(
             fusion_stages, 'fusion_stages')
         self.mask_source = str(mask_source).strip().lower()
@@ -626,7 +634,9 @@ class VTFormer(nn.Module):
         self.downsample_layers.append(stem)
         self.downsample_layers2.append(stem2)
 
-        self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=1))
+        self.FAM.append(FeatureAlignmentModule(
+            dim=2*embed_dim[0], lambda_c=self.fam_lambda,
+            lambda_s=self.fam_lambda, gate_scale=self.fam_gate_scale))
         self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
         # 定义Sigmoid激活
         self.sigmoid = nn.Sigmoid()
@@ -653,7 +663,9 @@ class VTFormer(nn.Module):
                 downsample_layer2 = checkpoint_wrapper(downsample_layer2)
             self.downsample_layers.append(downsample_layer)
             self.downsample_layers2.append(downsample_layer2)
-            self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=1))
+            self.FAM.append(FeatureAlignmentModule(
+                dim=2*embed_dim[i + 1], lambda_c=self.fam_lambda,
+                lambda_s=self.fam_lambda, gate_scale=self.fam_gate_scale))
 
         ##########################################################################
 
