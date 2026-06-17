@@ -124,7 +124,8 @@ grad_spike_debug_cfg = dict(
     type='GradSpikeDebugHook',
     threshold=10000,
     topk=10,
-    interval=1)
+    interval=1,
+    sanitize_nonfinite=True)
 model = dict(
     data_preprocessor=data_preprocessor,
     test_cfg=dict(mode='whole')
