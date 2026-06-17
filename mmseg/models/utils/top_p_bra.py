@@ -337,6 +337,20 @@ class TopkRouting(nn.Module):
 
         self._attn_vis_saved = True
 
+    def _debug_print_attn_weight(self, attn_weight: Tensor,
+                                 label: str) -> None:
+        if not self.debug_route:
+            return
+        with torch.no_grad():
+            attn = attn_weight.detach().float()
+            attn_max = attn.max().item()
+            attn_mean = attn.mean().item()
+            attn_sum = attn.sum(dim=-1).mean().item()
+            peak_ratio = (attn > 0.9).float().mean().item()
+            print(f'[AttnWeight] flag={self.route_flag} path={label} '
+                  f'max={attn_max:.6f} mean={attn_mean:.6f} '
+                  f'sum_mean={attn_sum:.6f} gt_0.9_ratio={peak_ratio:.6f}')
+
 class KVGather(nn.Module):
     def __init__(self, mul_weight='none'):
         super().__init__()
@@ -731,6 +745,7 @@ class ToppAttention(nn.Module):
         attn_weight = attn_weight.masked_fill(
             ~route_mask, torch.finfo(attn_weight.dtype).min)
         attn_weight = self.attn_act(attn_weight)
+        self.router._debug_print_attn_weight(attn_weight, 'torch')
         out = attn_weight @ v_pix_sel  # (n*p^2, m, w^2, topk*h_kv*w_kv) @ (n*p^2, m, topk*h_kv*w_kv, c) -> (n*p^2, m, w^2, c)
         out = rearrange(out, '(n j i) m (h w) c -> n (j h) (i w) (m c)', j=self.n_win, i=self.n_win,
                         h=H // self.n_win, w=W // self.n_win)
@@ -857,6 +872,7 @@ class ToppAttention(nn.Module):
         attn_weight = attn_weight.masked_fill(
             ~route_mask, torch.finfo(attn_weight.dtype).min)
         attn_weight = self.attn_act(attn_weight)
+        self.router._debug_print_attn_weight(attn_weight, 'fast')
         out = attn_weight @ v_pix_sel
         out = rearrange(out, '(n j i) m (h w) c -> n (j h) (i w) (m c)',
                         j=self.n_win, i=self.n_win,
