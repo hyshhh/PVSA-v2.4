@@ -259,9 +259,14 @@ class FeatureAlignmentModule(nn.Module):
     def __init__(self, dim, reduction=4, lambda_c=.1, lambda_s=.1,
                  gate_scale=1e-3):
         super(FeatureAlignmentModule, self).__init__()
+        channels = dim // 2
         self.lambda_c = lambda_c
         self.lambda_s = lambda_s
         self.gate_scale = gate_scale
+        self.norm1 = nn.GroupNorm(1, channels)
+        self.norm2 = nn.GroupNorm(1, channels)
+        self.align12 = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
+        self.align21 = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
         self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
         self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
         self.channel_gate = nn.Parameter(torch.zeros(1))
@@ -283,16 +288,20 @@ class FeatureAlignmentModule(nn.Module):
                 m.bias.data.zero_()
     
     def forward(self, x1, x2):
-        channel_weights = self.channel_weights(x1, x2)
-        spatial_weights = self.spatial_weights(x1, x2)
+        x1n = self.norm1(x1)
+        x2n = self.norm2(x2)
+        x2_to_1 = self.align12(x2n)
+        x1_to_2 = self.align21(x1n)
+        channel_weights = self.channel_weights(x1n, x2n)
+        spatial_weights = self.spatial_weights(x1n, x2n)
         channel_scale = (
             self.lambda_c * torch.tanh(self.channel_gate) * self.gate_scale)
         spatial_scale = (
             self.lambda_s * torch.tanh(self.spatial_gate) * self.gate_scale)
         mix12 = channel_scale * channel_weights[1] + spatial_scale * spatial_weights[1]
         mix21 = channel_scale * channel_weights[0] + spatial_scale * spatial_weights[0]
-        out_x1 = x1 + mix12.clamp(-1.0, 1.0) * (x2 - x1)
-        out_x2 = x2 + mix21.clamp(-1.0, 1.0) * (x1 - x2)
+        out_x1 = x1 + mix12.clamp(-1.0, 1.0) * (x2_to_1 - x1n)
+        out_x2 = x2 + mix21.clamp(-1.0, 1.0) * (x1_to_2 - x2n)
         return out_x1, out_x2
 class DepthWiseConvModule(nn.Module):
     def __init__(self,
