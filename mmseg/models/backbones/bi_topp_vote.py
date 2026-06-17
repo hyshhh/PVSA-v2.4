@@ -648,13 +648,9 @@ class VTFormer(nn.Module):
         self.downsample_layers2.append(stem2)
 
         self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=1))
-        self.fusion = nn.ModuleList()
         self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
         # 定义Sigmoid激活
         self.sigmoid = nn.Sigmoid()
-        self.fusion.append(nn.Sequential(
-            nn.Conv2d(2*embed_dim[0], embed_dim[0], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True),
-            nn.BatchNorm2d(embed_dim[0])))
         for i in range(3):
             downsample_layers = [
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
@@ -678,9 +674,6 @@ class VTFormer(nn.Module):
                 downsample_layer2 = checkpoint_wrapper(downsample_layer2)
             self.downsample_layers.append(downsample_layer)
             self.downsample_layers2.append(downsample_layer2)
-            self.fusion.append(nn.Sequential(
-                nn.Conv2d(2*embed_dim[i + 1], embed_dim[i + 1], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True),
-                nn.BatchNorm2d(embed_dim[i + 1])))
             self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=1))
 
         ##########################################################################

@@ -100,13 +100,12 @@ class BiFormer_fusion(VTFormer):
         self.bn12 = nn.ModuleList()
         self.conv12=nn.ModuleList()
         self.conv11=nn.ModuleList()
-        for i in range(3):
+        for i in range(4):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
             self.bn11.append(nn.BatchNorm2d(self.embed_dim[i]))
             self.bn12.append(nn.BatchNorm2d(self.embed_dim[i]))
             self.conv12.append(nn.Conv2d(self.embed_dim[i],self.embed_dim[i],1,1,0))
             self.conv11.append(nn.Conv2d(self.embed_dim[i],self.embed_dim[i],1,1,0))
-        self.extra_norms.append(LayerNorm2d(self.embed_dim[3]))
             
             
         self.apply(self._init_weights)
@@ -122,7 +121,7 @@ class BiFormer_fusion(VTFormer):
             default_feature_vis_config.update(feature_vis_config)
         self.feature_vis_config = default_feature_vis_config
         self.mask_fusion_scale = float(mask_fusion_scale)
-        self.mask_residual_gates = nn.Parameter(torch.zeros(3))
+        self.mask_residual_gates = nn.Parameter(torch.zeros(4))
         self._branch_inference_fused = False
         self._parallel_branch_streams = {}
 
@@ -233,23 +232,19 @@ class BiFormer_fusion(VTFormer):
 
         for i in range(4):
             stage_times = {}
-            if i in self.fusion_stages:
-                fused = _run_with_optional_wall_time(
-                    stage_profile, channel1[i], stage_times, 'fusion_conv',
-                    lambda i=i: self.fusion[i](
-                        torch.cat((channel1[i], channel2[i]), dim=1)))
-            else:
-                fused = _run_with_optional_wall_time(
-                    stage_profile, channel1[i], stage_times, 'fusion_add',
-                    lambda i=i: channel1[i] + channel2[i])
+            fused = _run_with_optional_wall_time(
+                stage_profile, channel1[i], stage_times, 'fusion_base',
+                lambda i=i: channel1[i] + channel2[i])
             channel3.append(fused)  # dim=1 表示按通道拼接
             if stage_times:
                 _log_topp_branch_stage_debug(
                     f'fusion{i}', tuple(channel1[i].shape),
                     tuple(channel2[i].shape), tuple(fused.shape),
                     stage_times)
-        for i in range(3):
+        for i in range(4):
             stage_times = {}
+            if i not in self.fusion_stages:
+                continue
             if self.mask_source == 'branch_low':
                 mask_source1 = channel1[i]
                 mask_source2 = channel2[i]
