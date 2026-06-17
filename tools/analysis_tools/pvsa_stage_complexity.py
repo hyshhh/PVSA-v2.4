@@ -62,15 +62,18 @@ def _format_params(value):
     return f'{value / 1e6:.3f}M'
 
 
-def _stage_prefixes(stage):
+def _stage_prefixes(backbone, stage):
+    fam_stages = set(getattr(backbone, 'fam_stages', (0, 1, 2, 3)))
+    fusion_stages = set(getattr(backbone, 'fusion_stages', (0, 1, 2, 3)))
     prefixes = {
         'cnn': [f'downsample_layers2.{stage}'],
         'transformer': [f'downsample_layers.{stage}', f'stages.{stage}'],
-        'FAM': [f'FAM.{stage}'],
-        'fusion': [f'fusion.{stage}', f'extra_norms.{stage}'],
+        'FAM': [f'FAM.{stage}'] if stage in fam_stages else [],
+        'vote_fusion': [],
+        'out_norm': [f'extra_norms.{stage}'],
     }
-    if stage < 3:
-        prefixes['fusion'].extend([
+    if stage in fusion_stages:
+        prefixes['vote_fusion'].extend([
             f'conv11.{stage}', f'conv12.{stage}',
             f'bn11.{stage}', f'bn12.{stage}',
         ])
@@ -110,11 +113,12 @@ def main():
     flops.uncalled_modules_warnings(False)
     by_module = flops.by_module()
 
-    print('stage | cnn | transformer | FAM | fusion')
+    print('stage | cnn | transformer | FAM | vote_fusion | out_norm')
     for stage in range(4):
         cells = []
-        prefixes_by_group = _stage_prefixes(stage)
-        for group in ('cnn', 'transformer', 'FAM', 'fusion'):
+        prefixes_by_group = _stage_prefixes(backbone, stage)
+        for group in ('cnn', 'transformer', 'FAM', 'vote_fusion',
+                      'out_norm'):
             prefixes = prefixes_by_group[group]
             group_flops = _sum_flops(by_module, prefixes)
             group_params = _count_params(backbone, prefixes)
