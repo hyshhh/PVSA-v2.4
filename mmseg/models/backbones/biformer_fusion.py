@@ -221,15 +221,14 @@ class BiFormer_fusion(VTFormer):
             if feature_vis_enabled:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_before_FAM_x.png')
                 self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_before_FAM_cnn.png')
-            fam_x, fam_cnn = x, cnn_encoder_out
             if i in self.fam_stages:
-                fam_x, fam_cnn = self.FAM[i](x, cnn_encoder_out)
-            channel1.append(fam_x)
-            channel2.append(fam_cnn)
+                x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)
+            channel1.append(x)
+            channel2.append(cnn_encoder_out)
 
             if feature_vis_enabled:
-                self._save_feature_channel_as_image(fam_x, f'{save_dir}/stage{i}_after_FAM_x.png')
-                self._save_feature_channel_as_image(fam_cnn, f'{save_dir}/stage{i}_after_FAM_cnn.png')
+                self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_after_FAM_x.png')
+                self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_after_FAM_cnn.png')
             if stage_times:
                 _log_topp_branch_stage_debug(
                     i, stage_input_shape, tuple(cnn_encoder_out.shape),

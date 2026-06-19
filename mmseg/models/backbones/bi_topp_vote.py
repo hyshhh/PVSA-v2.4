@@ -260,9 +260,6 @@ class FeatureAlignmentModule(nn.Module):
                  residual_scale=0.1, max_residual_scale=0.25):
         super(FeatureAlignmentModule, self).__init__()
         channels = dim // 2
-        self.lambda_c = float(lambda_c)
-        self.lambda_s = float(lambda_s)
-        self.lambda_norm = max(self.lambda_c + self.lambda_s, 1e-6)
         self.max_residual_scale = float(max_residual_scale)
         init_ratio = float(residual_scale) / max(self.max_residual_scale, 1e-6)
         init_ratio = min(max(init_ratio, 1e-4), 1 - 1e-4)
@@ -270,32 +267,28 @@ class FeatureAlignmentModule(nn.Module):
             torch.logit(torch.tensor(init_ratio, dtype=torch.float32)))
         self.norm1 = nn.GroupNorm(1, channels)
         self.norm2 = nn.GroupNorm(1, channels)
-        self.align12 = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
-        self.align21 = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
-        self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
-        self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
+        self.local = nn.Conv2d(
+            channels, channels, kernel_size=3, padding=1,
+            groups=channels, bias=True)
+        self.gate = nn.Sequential(
+            nn.Conv2d(3 * channels, channels, kernel_size=1, bias=True),
+            nn.Sigmoid())
+        self.proj = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
         self.reset_parameters()
 
-    @staticmethod
-    def _zero_last_conv(module):
-        for layer in reversed(module.mlp):
-            if isinstance(layer, nn.Conv2d):
-                nn.init.zeros_(layer.weight)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
-                return
-
     def reset_parameters(self):
-        # Zero-start the cross-branch residual path, as in stable residual
-        # adapters. The module is an exact identity at initialization.
-        nn.init.zeros_(self.align12.weight)
-        nn.init.zeros_(self.align21.weight)
-        if self.align12.bias is not None:
-            nn.init.zeros_(self.align12.bias)
-        if self.align21.bias is not None:
-            nn.init.zeros_(self.align21.bias)
-        self._zero_last_conv(self.channel_weights)
-        self._zero_last_conv(self.spatial_weights)
+        # Zero-start the guided residual path. FAM is an identity map at
+        # initialization and learns to inject CNN local cues gradually.
+        nn.init.kaiming_normal_(self.local.weight, mode='fan_out')
+        if self.local.bias is not None:
+            nn.init.zeros_(self.local.bias)
+        gate_conv = self.gate[0]
+        nn.init.zeros_(gate_conv.weight)
+        if gate_conv.bias is not None:
+            nn.init.zeros_(gate_conv.bias)
+        nn.init.zeros_(self.proj.weight)
+        if self.proj.bias is not None:
+            nn.init.zeros_(self.proj.bias)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -315,25 +308,12 @@ class FeatureAlignmentModule(nn.Module):
     def forward(self, x1, x2):
         x1n = torch.nan_to_num(self.norm1(x1), nan=0.0, posinf=0.0, neginf=0.0)
         x2n = torch.nan_to_num(self.norm2(x2), nan=0.0, posinf=0.0, neginf=0.0)
-        x2_to_1 = self.align12(x2n - x1n)
-        x1_to_2 = self.align21(x1n - x2n)
-        channel_weights = self.channel_weights(x1n, x2n)
-        spatial_weights = self.spatial_weights(x1n, x2n)
         residual_scale = (
             self.max_residual_scale * torch.sigmoid(self.residual_logit))
-        channel_weights = torch.softmax(
-            torch.stack(channel_weights, dim=0), dim=0)
-        spatial_weights = torch.softmax(
-            torch.stack(spatial_weights, dim=0), dim=0)
-        mix12 = (
-            self.lambda_c * channel_weights[1]
-            + self.lambda_s * spatial_weights[1]) / self.lambda_norm
-        mix21 = (
-            self.lambda_c * channel_weights[0]
-            + self.lambda_s * spatial_weights[0]) / self.lambda_norm
-        out_x1 = x1 + residual_scale * mix12 * torch.tanh(x2_to_1)
-        out_x2 = x2 + residual_scale * mix21 * torch.tanh(x1_to_2)
-        return out_x1, out_x2
+        gate = self.gate(torch.cat((x1n, x2n, torch.abs(x2n - x1n)), dim=1))
+        delta = self.proj(self.local(x2n - x1n))
+        out_x1 = x1 + residual_scale * gate * torch.tanh(delta)
+        return out_x1, x2
 class DepthWiseConvModule(nn.Module):
     def __init__(self,
                  embed_dims,
@@ -511,7 +491,8 @@ def _make_extra_block(channels, cfg):
     if block_type == 'dwconv':
         return DepthWiseConvModule(
             channels, int(channels * expansion), channels,
-            kernel_size=kernel_size, stride=1)
+            kernel_size=kernel_size, stride=1,
+            layer_scale=cfg.get('layer_scale', 1e-5))
     if block_type == 'mbconv':
         return MBConvModule(
             channels, expansion=expansion, kernel_size=kernel_size,

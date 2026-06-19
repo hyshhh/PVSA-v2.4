@@ -122,7 +122,7 @@ def _load_feature_alignment_module_class():
     return namespace['FeatureAlignmentModule']
 
 
-def test_fam_zero_starts_and_keeps_gradients_finite():
+def test_fam_zero_starts_and_keeps_cnn_branch_unchanged():
     import torch
 
     FeatureAlignmentModule = _load_feature_alignment_module_class()
@@ -137,6 +137,11 @@ def test_fam_zero_starts_and_keeps_gradients_finite():
 
     torch.testing.assert_close(y1, x1)
     torch.testing.assert_close(y2, x2)
+    with torch.no_grad():
+        fam.proj.weight.fill_(0.01)
+    y1, y2 = fam(x1, x2)
+    assert not torch.allclose(y1, x1)
+    torch.testing.assert_close(y2, x2)
     loss = (y1.square().mean() + y2.square().mean())
     loss.backward()
     assert torch.isfinite(x1.grad).all()
@@ -145,13 +150,12 @@ def test_fam_zero_starts_and_keeps_gradients_finite():
         assert param.grad is None or torch.isfinite(param.grad).all()
 
 
-def test_fam_alignment_does_not_feed_back_into_next_stage():
+def test_fam_alignment_feeds_back_into_next_stage():
     source = (
         _repo_root() / 'mmseg' / 'models' / 'backbones' / 'biformer_fusion.py'
     ).read_text(encoding='utf-8')
 
-    assert 'fam_x, fam_cnn = x, cnn_encoder_out' in source
-    assert 'fam_x, fam_cnn = self.FAM[i](x, cnn_encoder_out)' in source
-    assert 'channel1.append(fam_x)' in source
-    assert 'channel2.append(fam_cnn)' in source
-    assert 'x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)' not in source
+    assert 'x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)' in source
+    assert 'channel1.append(x)' in source
+    assert 'channel2.append(cnn_encoder_out)' in source
+    assert 'fam_x, fam_cnn = self.FAM[i](x, cnn_encoder_out)' not in source
