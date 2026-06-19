@@ -143,3 +143,15 @@ def test_fam_zero_starts_and_keeps_gradients_finite():
     assert torch.isfinite(x2.grad).all()
     for param in fam.parameters():
         assert param.grad is None or torch.isfinite(param.grad).all()
+
+
+def test_fam_alignment_does_not_feed_back_into_next_stage():
+    source = (
+        _repo_root() / 'mmseg' / 'models' / 'backbones' / 'biformer_fusion.py'
+    ).read_text(encoding='utf-8')
+
+    assert 'fam_x, fam_cnn = x, cnn_encoder_out' in source
+    assert 'fam_x, fam_cnn = self.FAM[i](x, cnn_encoder_out)' in source
+    assert 'channel1.append(fam_x)' in source
+    assert 'channel2.append(fam_cnn)' in source
+    assert 'x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)' not in source
