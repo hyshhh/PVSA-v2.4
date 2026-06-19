@@ -260,8 +260,9 @@ class FeatureAlignmentModule(nn.Module):
                  residual_scale=0.1, max_residual_scale=0.25):
         super(FeatureAlignmentModule, self).__init__()
         channels = dim // 2
-        self.lambda_c = lambda_c
-        self.lambda_s = lambda_s
+        self.lambda_c = float(lambda_c)
+        self.lambda_s = float(lambda_s)
+        self.lambda_norm = max(self.lambda_c + self.lambda_s, 1e-6)
         self.max_residual_scale = float(max_residual_scale)
         init_ratio = float(residual_scale) / max(self.max_residual_scale, 1e-6)
         init_ratio = min(max(init_ratio, 1e-4), 1 - 1e-4)
@@ -273,6 +274,28 @@ class FeatureAlignmentModule(nn.Module):
         self.align21 = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
         self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
         self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
+        self.reset_parameters()
+
+    @staticmethod
+    def _zero_last_conv(module):
+        for layer in reversed(module.mlp):
+            if isinstance(layer, nn.Conv2d):
+                nn.init.zeros_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+                return
+
+    def reset_parameters(self):
+        # Zero-start the cross-branch residual path, as in stable residual
+        # adapters. The module is an exact identity at initialization.
+        nn.init.zeros_(self.align12.weight)
+        nn.init.zeros_(self.align21.weight)
+        if self.align12.bias is not None:
+            nn.init.zeros_(self.align12.bias)
+        if self.align21.bias is not None:
+            nn.init.zeros_(self.align21.bias)
+        self._zero_last_conv(self.channel_weights)
+        self._zero_last_conv(self.spatial_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -290,20 +313,26 @@ class FeatureAlignmentModule(nn.Module):
                 m.bias.data.zero_()
     
     def forward(self, x1, x2):
-        x1n = self.norm1(x1)
-        x2n = self.norm2(x2)
-        x2_to_1 = self.align12(x2n)
-        x1_to_2 = self.align21(x1n)
+        x1n = torch.nan_to_num(self.norm1(x1), nan=0.0, posinf=0.0, neginf=0.0)
+        x2n = torch.nan_to_num(self.norm2(x2), nan=0.0, posinf=0.0, neginf=0.0)
+        x2_to_1 = self.align12(x2n - x1n)
+        x1_to_2 = self.align21(x1n - x2n)
         channel_weights = self.channel_weights(x1n, x2n)
         spatial_weights = self.spatial_weights(x1n, x2n)
         residual_scale = (
             self.max_residual_scale * torch.sigmoid(self.residual_logit))
-        mix12 = self.lambda_c * channel_weights[1] + self.lambda_s * spatial_weights[1]
-        mix21 = self.lambda_c * channel_weights[0] + self.lambda_s * spatial_weights[0]
-        out_x1 = x1 + mix12.clamp(-1.0, 1.0) * (x2_to_1 - x1n)
-        out_x2 = x2 + mix21.clamp(-1.0, 1.0) * (x1_to_2 - x2n)
-        out_x1 = x1 + residual_scale * (out_x1 - x1)
-        out_x2 = x2 + residual_scale * (out_x2 - x2)
+        channel_weights = torch.softmax(
+            torch.stack(channel_weights, dim=0), dim=0)
+        spatial_weights = torch.softmax(
+            torch.stack(spatial_weights, dim=0), dim=0)
+        mix12 = (
+            self.lambda_c * channel_weights[1]
+            + self.lambda_s * spatial_weights[1]) / self.lambda_norm
+        mix21 = (
+            self.lambda_c * channel_weights[0]
+            + self.lambda_s * spatial_weights[0]) / self.lambda_norm
+        out_x1 = x1 + residual_scale * mix12 * torch.tanh(x2_to_1)
+        out_x2 = x2 + residual_scale * mix21 * torch.tanh(x1_to_2)
         return out_x1, out_x2
 class DepthWiseConvModule(nn.Module):
     def __init__(self,

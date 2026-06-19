@@ -101,3 +101,45 @@ def test_fusion_and_route_mechanism_options_are_configurable():
     assert "route_pooling='avg'" in model_cfg
     assert 'img_scale = (224, 224)' in dataset_cfg
     assert 'crop_size = (224, 224)' in dataset_cfg
+
+
+def _load_feature_alignment_module_class():
+    root = _repo_root()
+    source = (
+        root / 'mmseg' / 'models' / 'backbones' / 'bi_topp_vote.py'
+    ).read_text(encoding='utf-8')
+    fam_start = source.index('class FeatureAlignmentModule')
+    fam_end = source.index('\nclass DepthWiseConvModule')
+    weights_start = source.index('class ChannelWeights')
+    weights_end = source.index('\n@MODELS.register_module()')
+    namespace = {}
+
+    exec('import math\nimport torch\nimport torch.nn as nn\n'
+         'def trunc_normal_(*args, **kwargs):\n'
+         '    return None\n', namespace)
+    exec(source[weights_start:weights_end], namespace)
+    exec(source[fam_start:fam_end], namespace)
+    return namespace['FeatureAlignmentModule']
+
+
+def test_fam_zero_starts_and_keeps_gradients_finite():
+    import torch
+
+    FeatureAlignmentModule = _load_feature_alignment_module_class()
+    torch.manual_seed(7)
+    fam = FeatureAlignmentModule(
+        dim=128, lambda_c=0.5, lambda_s=0.5,
+        residual_scale=0.1, max_residual_scale=0.25)
+    x1 = torch.randn(2, 64, 16, 16, requires_grad=True)
+    x2 = torch.randn(2, 64, 16, 16, requires_grad=True)
+
+    y1, y2 = fam(x1, x2)
+
+    torch.testing.assert_close(y1, x1)
+    torch.testing.assert_close(y2, x2)
+    loss = (y1.square().mean() + y2.square().mean())
+    loss.backward()
+    assert torch.isfinite(x1.grad).all()
+    assert torch.isfinite(x2.grad).all()
+    for param in fam.parameters():
+        assert param.grad is None or torch.isfinite(param.grad).all()
