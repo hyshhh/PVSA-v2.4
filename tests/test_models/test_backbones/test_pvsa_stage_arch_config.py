@@ -20,6 +20,7 @@ def test_vtformer_exposes_stage_arch_config():
     assert 'class MBConvModule' in source
     assert 'class ConvNeXtBlock' in source
     assert 'layer_scale=1e-6' in source
+    assert "layer_scale=cfg.get('layer_scale', 1e-5)" in source
     assert 'self.gamma.view(1, -1, 1, 1) * out' in source
     assert 'stage_archs=[' in config
     assert "extra_block_type='dwconv'" in config

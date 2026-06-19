@@ -27,7 +27,7 @@ model = dict(
             dict(
                 blocks=4,
                 trans_extra=dict(depth=0),
-                cnn_extra=dict(depth=1)),
+                cnn_extra=dict(depth=2)),
             dict(
                 blocks=6,
                 trans_extra=dict(depth=0),
@@ -41,7 +41,8 @@ model = dict(
         # ------------------------------
         n_win=7,
         # 可选FAM融合层。例如只融合第一层可写成[0]；空列表表示不用FAM。
-        fam_stages=[],
+        # fam_stages=[0,1,2,3], #1
+        fam_stages=[], #0
         # FAM使用归一化后的双分支对齐残差，默认有实际融合强度并限制最大注入幅度。
         fam_lambda=0.5,
         fam_residual_scale=0.1,
