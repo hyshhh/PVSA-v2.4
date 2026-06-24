@@ -72,6 +72,7 @@ class BiFormer_fusion(VTFormer):
                  use_pruned_kv_gather=False,
                  feature_vis_config=None,
                  mask_fusion_scale=0.5,
+                 mask_source='branch_deep',
                  **kwargs):
         try:
             super().__init__(
@@ -95,19 +96,19 @@ class BiFormer_fusion(VTFormer):
                     '当前 VTFormer 不支持 Top-P CUDA 参数，已降级为普通注意力路径。')
             super().__init__(**kwargs)
         self.topp_flash_debug = topp_flash_debug
+        self.mask_source = mask_source
         self.extra_norms = nn.ModuleList()
         self.bn11 = nn.ModuleList()
         self.bn12 = nn.ModuleList()
         self.conv12=nn.ModuleList()
         self.conv11=nn.ModuleList()
+        self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         for i in range(4):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
             self.bn11.append(nn.BatchNorm2d(self.embed_dim[i]))
             self.bn12.append(nn.BatchNorm2d(self.embed_dim[i]))
-            mask_in_dim = (
-                self.embed_dim[i + 1]
-                if self.mask_source == 'branch_deep' and i + 1 < 4
-                else self.embed_dim[i])
+            # i+1 层的通道数作为输入（stage 3 用当前层）
+            mask_in_dim = self.embed_dim[i + 1] if i + 1 < 4 else self.embed_dim[i]
             self.conv12.append(nn.Conv2d(mask_in_dim,self.embed_dim[i],1,1,0))
             self.conv11.append(nn.Conv2d(mask_in_dim,self.embed_dim[i],1,1,0))
             
@@ -249,50 +250,30 @@ class BiFormer_fusion(VTFormer):
             stage_times = {}
             if i not in self.fusion_stages:
                 continue
-            if self.mask_source == 'branch_low':
-                mask_source1 = channel1[i]
-                mask_source2 = channel2[i]
-            elif self.mask_source == 'branch_deep':
-                if i + 1 >= len(channel1):
-                    continue
-                mask_source1 = channel1[i + 1]
-                mask_source2 = channel2[i + 1]
+            # branch_deep: 用 i+1 层（stage 3 无更深层，退化为当前层）
+            # branch_low:  用当前层 i
+            if self.mask_source == 'branch_deep':
+                src_idx = i + 1 if i + 1 < 4 else i
             else:
-                mask_source1 = channel3[i]
-                mask_source2 = channel3[i]
+                src_idx = i
             C1 = _run_with_optional_wall_time(
-                stage_profile, mask_source1, stage_times, 'mask_conv1',
-                lambda i=i: self.conv11[i](mask_source1))
+                stage_profile, channel1[src_idx], stage_times, 'mask_conv1',
+                lambda i=i: self.conv11[i](channel1[src_idx]))
             C2 = _run_with_optional_wall_time(
-                stage_profile, mask_source2, stage_times, 'mask_conv2',
-                lambda i=i: self.conv12[i](mask_source2))
+                stage_profile, channel2[src_idx], stage_times, 'mask_conv2',
+                lambda i=i: self.conv12[i](channel2[src_idx]))
             bn_channel1 = _run_with_optional_wall_time(
                 stage_profile, C1, stage_times, 'mask_bn1',
                 lambda i=i: self.sigmoid(self.bn11[i](C1)))
             bn_channel2 = _run_with_optional_wall_time(
                 stage_profile, C2, stage_times, 'mask_bn2',
-                lambda i=i: self.sigmoid(self.bn12[i](C2)))
+                lambda i=i: self.sigmoid(self.bn11[i](C2)))
             if feature_vis_enabled and i==0:
-                self._save_feature_channel_as_image(bn_channel1, f'{save_dir}/mask1.png')
-                self._save_feature_channel_as_image(bn_channel2, f'{save_dir}/mask2.png')
-            if bn_channel1.shape[-2:] != channel3[i].shape[-2:]:
-                bn_channel1 = F.interpolate(
-                    bn_channel1, size=channel3[i].shape[-2:],
-                    mode='bilinear', align_corners=False)
-                bn_channel2 = F.interpolate(
-                    bn_channel2, size=channel3[i].shape[-2:],
-                    mode='bilinear', align_corners=False)
+                self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{save_dir}/mask1.png')
+                self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
             channel3[i] = _run_with_optional_wall_time(
                 stage_profile, channel3[i], stage_times, 'mask_fusion',
-                lambda i=i: channel3[i] + (
-                    self.mask_fusion_scale
-                    * torch.tanh(self.mask_residual_gates[i])) * (
-                    bn_channel1 * channel1[i] + bn_channel2 * channel2[i]))
-            if stage_times:
-                _log_topp_branch_stage_debug(
-                    f'mask{i}', tuple(mask_source1.shape),
-                    tuple(mask_source2.shape), tuple(channel3[i].shape),
-                    stage_times)
+                lambda i=i: channel3[i] + self.upsample2(bn_channel1) * channel3[i] + self.upsample2(bn_channel2) * channel3[i])
 
         for i in range(4):
             if feature_vis_enabled:
