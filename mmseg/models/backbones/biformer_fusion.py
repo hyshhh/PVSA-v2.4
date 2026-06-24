@@ -103,6 +103,10 @@ class BiFormer_fusion(VTFormer):
         self.conv12=nn.ModuleList()
         self.conv11=nn.ModuleList()
         self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        se_reduction = 4
+        self.se_pool = nn.ModuleList()
+        self.se_fc1 = nn.ModuleList()
+        self.se_fc2 = nn.ModuleList()
         for i in range(4):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
             self.bn11.append(nn.BatchNorm2d(self.embed_dim[i]))
@@ -111,12 +115,18 @@ class BiFormer_fusion(VTFormer):
             mask_in_dim = self.embed_dim[i + 1] if i + 1 < 4 else self.embed_dim[i]
             self.conv12.append(nn.Conv2d(mask_in_dim,self.embed_dim[i],1,1,0))
             self.conv11.append(nn.Conv2d(mask_in_dim,self.embed_dim[i],1,1,0))
+            # SE: 全局池化 → 降维 → 升维 → 通道权重
+            C = self.embed_dim[i]
+            self.se_pool.append(nn.AdaptiveAvgPool2d(1))
+            self.se_fc1.append(nn.Conv2d(C, C // se_reduction, 1))
+            self.se_fc2.append(nn.Conv2d(C // se_reduction, C, 1))
             
             
         self.apply(self._init_weights)
         self.init_weights(pretrained=pretrained)
         nn.SyncBatchNorm.convert_sync_batchnorm(self)
         self.sigmoid = nn.Sigmoid()
+        self.relu = nn.ReLU(inplace=True)
         default_feature_vis_config = dict(
             enabled=False,
             save_dir='cam/features_imgs4',
@@ -268,6 +278,14 @@ class BiFormer_fusion(VTFormer):
             bn_channel2 = _run_with_optional_wall_time(
                 stage_profile, C2, stage_times, 'mask_bn2',
                 lambda i=i: self.sigmoid(self.bn11[i](C2)))
+            # SE: 两个 mask 拼接后全局池化 → 通道注意力权重
+            se_w = _run_with_optional_wall_time(
+                stage_profile, bn_channel1, stage_times, 'se',
+                lambda i=i: self.sigmoid(self.se_fc2[i](
+                    self.relu(self.se_fc1[i](
+                        self.se_pool[i](bn_channel1 + bn_channel2))))))
+            bn_channel1 = bn_channel1 * se_w
+            bn_channel2 = bn_channel2 * se_w
             if feature_vis_enabled and i==0:
                 self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{save_dir}/mask1.png')
                 self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
