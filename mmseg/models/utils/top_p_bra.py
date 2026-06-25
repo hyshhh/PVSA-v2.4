@@ -195,7 +195,6 @@ class TopkRouting(nn.Module):
         self.W=W
         self.debug_route = debug_route
         # TODO: norm layer before/after linear?
-        self.emb = nn.Linear(qk_dim, qk_dim) if param_routing else nn.Identity()
         # routing activate
         self.routing_act = nn.Softmax(dim=-1)
         self.flag=0
@@ -222,8 +221,8 @@ class TopkRouting(nn.Module):
             if not self.diff_routing:
                 query = query.detach()
                 key = key.detach()
-            q = F.normalize(self.emb(query), dim=-1)
-            k = F.normalize(self.emb(key), dim=-1)
+            q = F.normalize(query, dim=-1)
+            k = F.normalize(key, dim=-1)
             attn = (q * self.scale) @ k.transpose(-2, -1)   # (n, p2, p2)
         else:
             attn = GA
@@ -268,7 +267,7 @@ class TopkRouting(nn.Module):
         topk_index = topk_index.masked_fill(~valid_mask, 0)
 
         #能量补偿
-        topk_score = topk_score * self.energy
+        topk_score = topk_score * max_len * self.energy
         if self.debug_route:
             score_detached = topk_score.detach().float()
             valid_score = score_detached[valid_mask]
