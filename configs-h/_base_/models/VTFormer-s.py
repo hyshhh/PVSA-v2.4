@@ -71,6 +71,10 @@ model = dict(
         head_dim=32,
         # 使用软路由权重抑制被选窗口的整体幅度；配合layer scale稳定训练。
         param_routing=False, diff_routing=False, soft_routing=False,
+        # 路由 mask：对 padding 位置填 -inf，防止无效 KV 参与注意力计算
+        use_route_mask=False,
+        # 数值保护：softmax 前做 nan_to_num + clamp，防止梯度爆炸
+        use_nan_guard=False,
         pre_norm=True,
         pe=None,
         auto_pad=True,

@@ -186,7 +186,8 @@ class TopkRouting(nn.Module):
 
     def __init__(self, qk_dim, topk=4, qk_scale=None, param_routing=False,
                  diff_routing=False, W=False, route_configs=None,
-                 attn_vis_config=None, debug_route=False):
+                 attn_vis_config=None, debug_route=False,
+                 use_nan_guard=False):
         super().__init__()
         self.route_flag = topk
         self.qk_dim = qk_dim
@@ -194,6 +195,7 @@ class TopkRouting(nn.Module):
         self.diff_routing = diff_routing
         self.W=W
         self.debug_route = debug_route
+        self.use_nan_guard = use_nan_guard
         # TODO: norm layer before/after linear?
         # routing activate
         self.routing_act = nn.Softmax(dim=-1)
@@ -233,10 +235,13 @@ class TopkRouting(nn.Module):
             attn, k=self.topk, dim=-1, sorted=True
         )  # (n, p2, k)
 
-        topk_score = torch.nan_to_num(topk_score, nan=0.0, posinf=50.0,
-                                      neginf=-50.0)
-        topk_score = (topk_score / self.Temperature).clamp(-50.0, 50.0)
-        topk_score = torch.softmax(topk_score, dim=-1)
+        if self.use_nan_guard:
+            topk_score = torch.nan_to_num(topk_score, nan=0.0, posinf=50.0,
+                                          neginf=-50.0)
+            topk_score = (topk_score / self.Temperature).clamp(-50.0, 50.0)
+            topk_score = torch.softmax(topk_score, dim=-1)
+        else:
+            topk_score = torch.softmax(topk_score / self.Temperature, dim=-1)
         self._maybe_save_attention(attn, topk_score, topk_index)
 
         # 5️⃣ Cumulative probability pruning
@@ -425,7 +430,9 @@ class ToppAttention(nn.Module):
                  use_fast_attention=False,
                  debug_route=False,
                  route_pooling='avgmax',
-                 topp_flash_debug=False):
+                 topp_flash_debug=False,
+                 use_route_mask=False,
+                 use_nan_guard=False):
         super().__init__()
         # local attention setting
         self.dim = dim
@@ -459,6 +466,7 @@ class ToppAttention(nn.Module):
         self.param_routing = param_routing
         self.diff_routing = diff_routing
         self.soft_routing = soft_routing
+        self.use_route_mask = use_route_mask
         self.W=W
         # router
         assert not (self.param_routing and not self.diff_routing)  # cannot be with_param=True and diff_routing=False
@@ -470,7 +478,8 @@ class ToppAttention(nn.Module):
                                   param_routing=self.param_routing,W=self.W,
                                   route_configs=self.topp_route_configs,
                                   attn_vis_config=self.attn_vis_config,
-                                  debug_route=debug_route)
+                                  debug_route=debug_route,
+                                  use_nan_guard=use_nan_guard)
         if self.soft_routing:  # soft routing, always diffrentiable (if no detach)
             mul_weight = 'soft'
         elif self.diff_routing:  # hard differentiable routing
@@ -739,10 +748,11 @@ class ToppAttention(nn.Module):
 
         # param-free multihead attention    —— 注意力计算
         attn_weight = (q_pix * self.scale) @ k_pix_sel  # (n*p^2, m, w^2, c) @ (n*p^2, m, c, topk*h_kv*w_kv) -> (n*p^2, m, w^2, topk*h_kv*w_kv)
-        route_mask = r_mask[..., None].expand(-1, -1, -1, kv_pix_sel.size(-2))
-        route_mask = rearrange(route_mask, 'n p2 k w2 -> (n p2) 1 1 (k w2)')
-        attn_weight = attn_weight.masked_fill(
-            ~route_mask, torch.finfo(attn_weight.dtype).min)
+        if self.use_route_mask:
+            route_mask = r_mask[..., None].expand(-1, -1, -1, kv_pix_sel.size(-2))
+            route_mask = rearrange(route_mask, 'n p2 k w2 -> (n p2) 1 1 (k w2)')
+            attn_weight = attn_weight.masked_fill(
+                ~route_mask, torch.finfo(attn_weight.dtype).min)
         attn_weight = self.attn_act(attn_weight)
         self.router._debug_print_attn_weight(attn_weight, 'torch')
         out = attn_weight @ v_pix_sel  # (n*p^2, m, w^2, topk*h_kv*w_kv) @ (n*p^2, m, topk*h_kv*w_kv, c) -> (n*p^2, m, w^2, c)

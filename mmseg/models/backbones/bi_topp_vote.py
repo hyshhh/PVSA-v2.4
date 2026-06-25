@@ -153,7 +153,9 @@ class Block(nn.Module):
                  use_fast_attention=False,
                  debug_route=False,
                  route_pooling='avgmax',
-                 topp_flash_debug=False):
+                 topp_flash_debug=False,
+                 use_route_mask=False,
+                 use_nan_guard=False):
         super().__init__()
         qk_dim = qk_dim or dim
 
@@ -184,7 +186,9 @@ class Block(nn.Module):
                                                 use_fast_attention=use_fast_attention,
                                                 debug_route=debug_route,
                                                 route_pooling=route_pooling,
-                                                topp_flash_debug=topp_flash_debug)
+                                                topp_flash_debug=topp_flash_debug,
+                                                use_route_mask=use_route_mask,
+                                                use_nan_guard=use_nan_guard)
         elif topk == -1:
             self.use_topp_attention = False
             self.attn = Attention(dim=dim)
@@ -582,7 +586,9 @@ class VTFormer(nn.Module):
                  transformer_branch_depth=None,
                  cnn_branch_depth=None,
                  route_pooling='avgmax',
-                 topp_flash_debug=False):
+                 topp_flash_debug=False,
+                 use_route_mask=False,
+                 use_nan_guard=False):
 
         super().__init__()
         self.W=W
@@ -595,6 +601,8 @@ class VTFormer(nn.Module):
         self.use_fast_attention = use_fast_attention
         self.debug_route = debug_route
         self.topp_flash_debug = topp_flash_debug
+        self.use_route_mask = use_route_mask
+        self.use_nan_guard = use_nan_guard
         self.fam_stages = self._normalize_stage_indices(
             fam_stages, 'fam_stages')
         self.route_pooling = route_pooling
@@ -714,7 +722,9 @@ class VTFormer(nn.Module):
                         use_fast_attention=self.use_fast_attention,
                         debug_route=self.debug_route,
                         route_pooling=self.route_pooling,
-                        topp_flash_debug=self.topp_flash_debug) for j in range(self.depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
+                        topp_flash_debug=self.topp_flash_debug,
+                        use_route_mask=self.use_route_mask,
+                        use_nan_guard=self.use_nan_guard) for j in range(self.depth[i])],  # 是否自动为卷积层补零，使得输出尺寸与输入一致
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
