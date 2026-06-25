@@ -66,7 +66,7 @@ model = dict(
         debug_route=False,
         side_dwconv=5,
         before_attn_dwconv=3,
-        layer_scale_init_value=1e-6,
+        layer_scale_init_value=-1,
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
         # 使用软路由权重抑制被选窗口的整体幅度；配合layer scale稳定训练。
