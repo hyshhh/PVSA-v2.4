@@ -70,7 +70,7 @@ model = dict(
         qk_dims=[64, 128, 256, 512],
         head_dim=32,
         # 使用软路由权重抑制被选窗口的整体幅度；配合layer scale稳定训练。
-        param_routing=False, diff_routing=False, soft_routing=True,
+        param_routing=False, diff_routing=False, soft_routing=False,
         pre_norm=True,
         pe=None,
         auto_pad=True,
