@@ -9,13 +9,13 @@
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options model.backbone.topp_flash_backend=None model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=16 \
-  --work-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.3/work_dirs/gqy
+  --work-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/gqy
 ```
 如果训练中偶发出现超大梯度，可以临时打开梯度尖峰定位钩子，只在异常时打印梯度最大的参数：
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options model.backbone.topp_flash_backend=None model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=16 grad_spike_debug=True \
-  --work-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.3/work_dirs/nex/0.1111
+  --work-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/nex/0.1111
 ```
 ## 原始路径推理
 ```bash
@@ -39,7 +39,7 @@ python tools/analysis_tools/pvsa_stage_complexity.py \
 CUDA_VISIBLE_DEVICES=0 python tools/test.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
-  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.3/vis_results/gqy
+  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/vis_results/gqy
 ```
 ## 自定义 CUDA 核推理
 首次运行或修改 CUDA 源码后，建议先清理旧编译缓存：
