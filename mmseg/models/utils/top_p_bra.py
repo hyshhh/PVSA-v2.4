@@ -441,7 +441,6 @@ class ToppAttention(nn.Module):
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
-                 route_pooling='avgmax',
                  topp_flash_debug=False,
                  use_route_mask=False,
                  use_nan_guard=False):
@@ -463,10 +462,7 @@ class ToppAttention(nn.Module):
         self.use_fast_attention = use_fast_attention
         self.topp_flash_debug = topp_flash_debug
         self._topp_flash_warned = False
-        self.route_pooling = str(route_pooling).strip().lower()
-        if self.route_pooling not in ('avg', 'max', 'avgmax'):
-            raise ValueError(
-                "route_pooling must be one of 'avg', 'max', or 'avgmax'.")
+        self.route_pooling = 'avgmax'
 
         ################side_dwconv (i.e. LCE in ShuntedTransformer)###########
         self.lepe = nn.Conv2d(dim, dim, kernel_size=side_dwconv, stride=1, padding=side_dwconv // 2,

@@ -90,7 +90,6 @@ class Block(nn.Module):
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
-                 route_pooling='avgmax',
                  topp_flash_debug=False,
                  use_route_mask=False,
                  use_nan_guard=False):
@@ -122,7 +121,6 @@ class Block(nn.Module):
                                     attn_vis_config=attn_vis_config,
                                     use_fast_attention=use_fast_attention,
                                     debug_route=debug_route,
-                                    route_pooling=route_pooling,
                                     topp_flash_debug=topp_flash_debug,
                                     use_route_mask=use_route_mask,
                                     use_nan_guard=use_nan_guard)
@@ -426,9 +424,10 @@ class VTFormer(nn.Module):
                  attn_vis_config=None,
                  use_fast_attention=False,
                  debug_route=False,
-                 route_pooling='avgmax',
                  use_route_mask=False,
                  use_nan_guard=False,
+                 fam_reduction=4,
+                 feature_vis_config=None,
                  **kwargs):
 
         super().__init__()
@@ -442,9 +441,9 @@ class VTFormer(nn.Module):
         self.attn_vis_config = attn_vis_config
         self.use_fast_attention = use_fast_attention
         self.debug_route = debug_route
-        self.route_pooling = route_pooling
         self.use_route_mask = use_route_mask
         self.use_nan_guard = use_nan_guard
+        self.feature_vis_config = feature_vis_config or {}
         self._inference_fused = False
         self._disable_inference_fusion = False
         self.num_classes = num_classes
@@ -486,7 +485,7 @@ class VTFormer(nn.Module):
         self.downsample_layers.append(stem)
         self.downsample_layers2.append(stem2)
 
-        self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=1))
+        self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=fam_reduction))
         self.fusion = nn.ModuleList()
         self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
         # 定义Sigmoid激活
@@ -536,7 +535,7 @@ class VTFormer(nn.Module):
             self.fusion.append(
             nn.Conv2d(2*embed_dim[i + 1], embed_dim[i + 1], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
             )
-            self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=1))
+            self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=fam_reduction))
 
         ##########################################################################
 
@@ -577,7 +576,6 @@ class VTFormer(nn.Module):
                         attn_vis_config=self.attn_vis_config,
                         use_fast_attention=self.use_fast_attention,
                         debug_route=self.debug_route,
-                        route_pooling=self.route_pooling,
                         topp_flash_debug=self.topp_flash_debug,
                         use_route_mask=self.use_route_mask,
                         use_nan_guard=self.use_nan_guard) for j in range(depth[i])],

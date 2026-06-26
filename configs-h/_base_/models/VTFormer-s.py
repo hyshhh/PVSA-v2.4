@@ -29,28 +29,30 @@ model = dict(
         pre_norm=True,
         pe=None,
         auto_pad=True,
+        # FAM 空间注意力降维比例（1=无降维，4=压缩到1/4通道）
+        fam_reduction=4,
         # CUDA 推理后端
         topp_flash_backend=None,
         topp_flash_block_windows=64,
         topp_flash_debug=False,
         # 特征图保存开关
         feature_vis_config=dict(
-            enabled=False,
-            save_dir='cam/features_imgs4',
-            out_size=512,
-            channel_reduce='mean'),
+            enabled=False,              # True 开启保存
+            save_dir='cam/features_imgs4',  # 保存目录
+            out_size=512,               # 上采样目标尺寸
+            channel_reduce='mean'),     # 通道聚合方式：'mean' | 'max'
         # 注意力图保存开关
         attn_vis_config=dict(
-            enabled=False,
-            save_heatmap=False,
-            save_topk=True,
-            query_index=32,
-            trigger_maxk=25,
-            image_path='',
-            heatmap_save_path='',
-            topk_save_path='',
-            dark_ratio=0.3,
-            once=True)
+            enabled=False,              # True 开启保存
+            save_heatmap=False,         # 是否保存叠加热力图
+            save_topk=True,             # 是否保存 top-k 窗口选择图
+            query_index=32,             # 可视化的 query 窗口索引
+            trigger_maxk=25,            # 只在 topk==25 时触发（None=始终触发）
+            image_path='',              # 叠加热力图的背景图片路径（必须配置）
+            heatmap_save_path='cam/attn_vis/heatmap.png',    # 热力图保存路径
+            topk_save_path='cam/attn_vis/topk_select.png',   # top-k 选择图保存路径
+            dark_ratio=0.3,             # 背景暗化比例
+            once=True)                  # True=只保存第一张图
     ),
     decode_head=dict(
         type='SegformerHead',

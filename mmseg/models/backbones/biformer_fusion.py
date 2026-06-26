@@ -63,50 +63,59 @@ class BiFormer_fusion(VTFormer):
     def forward_features(self, x: torch.Tensor):
         if not self.training:
             self.optimize_for_inference()
+
+        vis_cfg = self.feature_vis_config
+        vis_enabled = vis_cfg.get('enabled', False)
+        vis_once = vis_cfg.get('once', True)
+        vis_dir = vis_cfg.get('save_dir', 'cam/features_imgs4')
+        vis_out_size = vis_cfg.get('out_size', 512)
+        vis_reduce = vis_cfg.get('channel_reduce', 'mean')
+
+        if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
+            os.makedirs(vis_dir, exist_ok=True)
+
         out = []
         cnn_encoder_out = x
-
-        # 保存图片的目录
-        flag=0
-        save_dir = 'cam/features_imgs4'
-        os.makedirs(save_dir, exist_ok=True)
         channel1=[]
         channel2=[]
         channel3=[]
         for i in range(4):
-            if flag==1:
-                self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_xinput.png')
+            if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
+                self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_xinput.png', vis_out_size, vis_reduce)
             cnn_encoder_out = self.downsample_layers2[i](cnn_encoder_out)
             x = self.downsample_layers[i](x)
             x = self.stages[i](x)
-            if flag==1:
-                self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_before_FAM_x.png')
-                self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_before_FAM_cnn.png')
+            if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
+                self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_before_FAM_x.png', vis_out_size, vis_reduce)
+                self._save_feature_channel_as_image(cnn_encoder_out, f'{vis_dir}/stage{i}_before_FAM_cnn.png', vis_out_size, vis_reduce)
 
             x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)
             channel1.append(x)
             channel2.append(cnn_encoder_out)
 
-            if flag==1:
-                self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_after_FAM_x.png')
-                self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_after_FAM_cnn.png')
+            if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
+                self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_after_FAM_x.png', vis_out_size, vis_reduce)
+                self._save_feature_channel_as_image(cnn_encoder_out, f'{vis_dir}/stage{i}_after_FAM_cnn.png', vis_out_size, vis_reduce)
 
         for i in range(4):
-            channel3.append(self.fusion[i](torch.cat((channel1[i], channel2[i]), dim=1)))  # dim=1 表示按通道拼接
+            channel3.append(self.fusion[i](torch.cat((channel1[i], channel2[i]), dim=1)))
         for i in range(3):
             C1=self.conv11[i](channel1[i + 1])
             C2=self.conv12[i](channel2[i + 1])
             bn_channel1 = self.sigmoid(self.bn[i](C1))
             bn_channel2 = self.sigmoid(self.bn[i](C2))
-            if flag==1 and i==0:
-                self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{save_dir}/mask1.png')
-                self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
+            if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)) and i==0:
+                self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{vis_dir}/mask1.png', vis_out_size, vis_reduce)
+                self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{vis_dir}/mask2.png', vis_out_size, vis_reduce)
             channel3[i] = channel3[i] + self.upsample2(bn_channel1) * channel3[i] + self.upsample2(bn_channel2) * channel3[i]
-        
+
         for i in range(4):
-            if flag==1:
-                self._save_feature_channel_as_image(channel3[i], f'{save_dir}/stage{i}_after_channel.png')
+            if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
+                self._save_feature_channel_as_image(channel3[i], f'{vis_dir}/stage{i}_after_channel.png', vis_out_size, vis_reduce)
             out.append(self.extra_norms[i](channel3[i]))
+
+        if vis_enabled:
+            self._feature_vis_saved = True
         return tuple(out)
 
 
