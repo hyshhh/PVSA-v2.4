@@ -117,7 +117,8 @@ def main():
         def hook_fn(module, inp, out):
             flops = 0
             if isinstance(module, torch.nn.Linear):
-                flops = inp[0].numel() * out.numel() // inp[0].shape[0]
+                # FLOPs = batch * in_features * out_features
+                flops = inp[0].shape[0] * module.in_features * module.out_features
             elif isinstance(module, torch.nn.Conv2d):
                 out_h, out_w = out.shape[2], out.shape[3]
                 flops = module.in_channels * module.out_channels * \
