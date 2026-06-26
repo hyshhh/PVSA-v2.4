@@ -109,7 +109,31 @@ def main():
     input_shape = _input_shape(args.shape)
     dummy = torch.randn(1, *input_shape, device=device)
 
-    # fvcore 对 nn.Identity 的别名处理有 bug，逐模块手动计算绕过
+    # fvcore 对 nn.Identity 的别名处理有 bug，用逐层 hook 手动统计 FLOPs
+    flops_dict = {}
+    hooks = []
+
+    def _make_hook(name):
+        def hook_fn(module, inp, out):
+            if isinstance(module, torch.nn.Linear):
+                flops_dict[name] = inp[0].numel() * out.numel() // inp[0].shape[0]
+            elif isinstance(module, torch.nn.Conv2d):
+                out_h, out_w = out.shape[2], out.shape[3]
+                flops_dict[name] = module.in_channels * module.out_channels * \
+                    module.kernel_size[0] * module.kernel_size[1] * out_h * out_w // module.groups
+            elif isinstance(module, torch.nn.BatchNorm2d):
+                flops_dict[name] = inp[0].numel() * 2
+        return hook_fn
+
+    for name, module in backbone.named_modules():
+        hooks.append(module.register_forward_hook(_make_hook(name)))
+
+    with torch.no_grad():
+        backbone(dummy)
+
+    for h in hooks:
+        h.remove()
+
     print('stage | cnn | transformer | FAM | vote_fusion | out_norm')
     for stage in range(4):
         cells = []
@@ -117,13 +141,17 @@ def main():
         for group in ('cnn', 'transformer', 'FAM', 'vote_fusion',
                       'out_norm'):
             prefixes = prefixes_by_group[group]
+            group_flops = sum(float(flops_dict.get(p, 0.0)) for p in prefixes
+                              if p in flops_dict or any(
+                                  p2.startswith(p + '.') for p2 in flops_dict))
             group_params = _count_params(backbone, prefixes)
-            cells.append(f'*/{_format_params(group_params)}')
+            cells.append(
+                f'{_format_flops(group_flops)}/{_format_params(group_params)}')
         print(f'{stage} | ' + ' | '.join(cells))
 
-    # 打印整体参数量
     total_params = sum(p.numel() for p in backbone.parameters())
-    print(f'\nTotal backbone params: {total_params:,} ({total_params/1e6:.2f}M)')
+    total_flops = sum(flops_dict.values())
+    print(f'\nTotal: {total_flops/1e9:.2f}G FLOPs, {total_params/1e6:.2f}M params')
 
 
 if __name__ == '__main__':
