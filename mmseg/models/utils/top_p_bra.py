@@ -1,6 +1,6 @@
 import os
-from typing import Dict, Optional, Tuple
 import warnings
+from typing import Dict, Optional, Tuple
 
 import cv2
 import matplotlib.pyplot as plt
@@ -22,6 +22,10 @@ DEFAULT_ATTN_VIS_CONFIG = dict(enabled=False)
 _TOPP_FLASH_STAGE_LOGGED = set()
 _TOPP_FLASH_STAGE_PROFILED = set()
 
+
+# ---------------------------------------------------------------------------
+# CUDA backend helpers (inference only, no effect on training)
+# ---------------------------------------------------------------------------
 
 def _normalize_topp_backend(backend: Optional[str]) -> Optional[str]:
     if backend is None:
@@ -86,39 +90,29 @@ def _log_topp_stage_debug(path: str, x: Tensor, q_pix: Tensor, kv_pix: Tensor,
         f'heads={num_heads} qk_dim={qk_dim} dim={dim} n_win={n_win} '
         f'{parts}')
 
-def overlay_topk_attn_block_no_heatmap(img, topk_score, topk_index, total_patches, dark_ratio=0.3):
-    """
-    无热力图版本的 Top-K 注意力可视化 (聚光灯效果)
 
-    Args:
-        img: 图像路径或 numpy 数组
-        topk_score: 1D tensor, 某个 query 对应的 top-k 得分
-        topk_index: 1D tensor, 某个 query 对应的 top-k 索引
-        total_patches: 原始序列的总长度
-        dark_ratio: 背景变暗的比例 (0.0全黑, 1.0完全不变，0.3表示背景只有30%亮度)
-    """
+# ---------------------------------------------------------------------------
+# Visualization helpers (unchanged from V1.1)
+# ---------------------------------------------------------------------------
+
+def overlay_topk_attn_block_no_heatmap(img, topk_score, topk_index, total_patches, dark_ratio=0.3):
     if isinstance(img, str):
         img = cv2.imread(img)
 
     H, W = img.shape[:2]
 
-    # 1. 获取索引
     index = topk_index.detach().cpu().numpy()
 
-    # 2. 重建掩码网格 (不需要真实得分了，选中的地方设为 1，其余为 0)
     attn_reconstructed = np.zeros(total_patches, dtype=np.uint8)
     attn_reconstructed[index] = 1
 
-    # 3. Reshape 为 2D 网格
     size = int(total_patches ** 0.5)
     attn_map = attn_reconstructed.reshape(size, size)
 
-    # 4. 放大到图像尺寸 (Block 形式)
     scale_h = H // size
     scale_w = W // size
     attn_map_block = np.repeat(np.repeat(attn_map, scale_h, axis=0), scale_w, axis=1)
 
-    # 5. Padding 补齐边界
     pad_h = H - attn_map_block.shape[0]
     pad_w = W - attn_map_block.shape[1]
     attn_map_block = np.pad(
@@ -127,17 +121,15 @@ def overlay_topk_attn_block_no_heatmap(img, topk_score, topk_index, total_patche
         mode='edge'
     )
 
-    # 6. 生成聚光灯效果
-    # 将 mask 扩展为 3 通道，以便与图像计算
     mask = attn_map_block[..., np.newaxis]
 
-    # 生成一张变暗的底图
     dark_img = (img * dark_ratio).astype(np.uint8)
 
-    # 核心：如果是 Top-K 区域 (mask==1)，使用原图；否则使用变暗的底图
     overlay = np.where(mask == 1, img, dark_img)
 
     return overlay
+
+
 def overlay_attn_block(img, attn):
     if isinstance(img, str):
         img = cv2.imread(img)
@@ -149,22 +141,19 @@ def overlay_attn_block(img, attn):
 
     attn_map = attn.reshape(size, size)
 
-    # 归一化
     attn_map = (attn_map - attn_map.min()) / (attn_map.max() - attn_map.min() + 1e-6)
 
     scale_h = H // size
     scale_w = W // size
 
-    # repeat 放大
     attn_map_block = np.repeat(np.repeat(attn_map, scale_h, axis=0), scale_w, axis=1)
 
-    # ✅ 关键：padding补齐
     pad_h = H - attn_map_block.shape[0]
     pad_w = W - attn_map_block.shape[1]
     attn_map_block = np.pad(
         attn_map_block,
         ((0, pad_h), (0, pad_w)),
-        mode='edge'   # 用边界值填充（最合理）
+        mode='edge'
     )
 
     heatmap = cv2.applyColorMap((attn_map_block * 255).astype(np.uint8), cv2.COLORMAP_JET)
@@ -172,6 +161,12 @@ def overlay_attn_block(img, attn):
     overlay = (0.6 * img + 0.4 * heatmap).astype(np.uint8)
 
     return overlay
+
+
+# ---------------------------------------------------------------------------
+# TopkRouting: V1.1 training logic + optional CUDA/debug/vis support
+# ---------------------------------------------------------------------------
+
 class TopkRouting(nn.Module):
     """
     differentiable topk routing with scaling
@@ -185,41 +180,68 @@ class TopkRouting(nn.Module):
     """
 
     def __init__(self, qk_dim, topk=4, qk_scale=None, param_routing=False,
-                 diff_routing=False, W=False, route_configs=None,
-                 attn_vis_config=None, debug_route=False,
+                 diff_routing=False, W=False,
+                 route_configs=None,
+                 attn_vis_config=None,
+                 debug_route=False,
                  use_nan_guard=False):
         super().__init__()
         self.route_flag = topk
         self.qk_dim = qk_dim
         self.scale = qk_scale or qk_dim ** -0.5
         self.diff_routing = diff_routing
-        self.W=W
+        self.W = W
         self.debug_route = debug_route
         self.use_nan_guard = use_nan_guard
-        # TODO: norm layer before/after linear?
+        self.emb = nn.Linear(qk_dim, qk_dim) if param_routing else nn.Identity()
         # routing activate
         self.routing_act = nn.Softmax(dim=-1)
-        self.flag=0
-        route_configs = _normalize_route_configs(route_configs)
-        if self.route_flag not in route_configs:
-            raise KeyError(
-                f'topk flag {self.route_flag} is not configured in '
-                'topp_route_configs.')
-        route_config = route_configs[self.route_flag]
-        self.topk = int(route_config['maxk'])
-        self.P = float(route_config['p'])
-        self.Temperature = float(route_config['temperature'])
-        self.energy = float(route_config['energy'])
+        self.flag = 0
         self.attn_vis_config = _normalize_attn_vis_config(attn_vis_config)
         self._attn_vis_saved = False
 
-        self.silu=True
-        #能量补偿因子
+        # V1.1 hardcoded route parameters (unchanged)
+        # top-p-v2/3_2025_12_25
+        if route_configs is not None:
+            route_configs = _normalize_route_configs(route_configs)
+            if self.route_flag not in route_configs:
+                raise KeyError(
+                    f'topk flag {self.route_flag} is not configured in '
+                    'topp_route_configs.')
+            route_config = route_configs[self.route_flag]
+            self.topk = int(route_config['maxk'])
+            self.P = float(route_config['p'])
+            self.Temperature = float(route_config['temperature'])
+            self.energy = float(route_config['energy'])
+        else:
+            # Fallback to V1.1 hardcoded values
+            if self.route_flag == 16:
+                self.topk = 25
+                self.P = 0.2
+                self.Temperature = 0.0175
+                self.energy = 4
+            elif self.route_flag == 12:
+                self.topk = 18
+                self.P = 0.4
+                self.Temperature = 0.025
+                self.energy = 1.5
+            elif self.route_flag == 8:
+                self.topk = 36
+                self.P = 0.6
+                self.Temperature = 0.05
+                self.energy = 0.75
+            elif self.route_flag == 6:
+                self.P = 0.8
+                self.topk = 49
+                self.Temperature = 0.15
+                self.energy = 0.4
 
-#top—p-v3_2025_12_25
-    def forward(self, query: Tensor, key: Tensor,GA):
+        self.silu = True
 
-        if self.W==False or GA==None:
+    # top-p-v3_2025_12_25
+    def forward(self, query: Tensor, key: Tensor, GA):
+
+        if self.W == False or GA == None:
             if not self.diff_routing:
                 query = query.detach()
                 key = key.detach()
@@ -230,7 +252,7 @@ class TopkRouting(nn.Module):
             attn = GA
             if self.debug_route:
                 print('[Route] using external GA attention map.')
-        # 3️⃣ Top-k selection (no sorting for speed)
+        # 3. Top-k selection (no sorting for speed)
         topk_score, topk_index = torch.topk(
             attn, k=self.topk, dim=-1, sorted=True
         )  # (n, p2, k)
@@ -244,14 +266,14 @@ class TopkRouting(nn.Module):
             topk_score = torch.softmax(topk_score / self.Temperature, dim=-1)
         self._maybe_save_attention(attn, topk_score, topk_index)
 
-        # 5️⃣ Cumulative probability pruning
+        # 5. Cumulative probability pruning
         cumsum = torch.cumsum(topk_score, dim=-1)      # (n, p2, k)
 
         keep_mask = cumsum <= self.P                   # (n, p2, k)
         keep_len = keep_mask.sum(dim=-1, keepdim=True) # (n, p2, 1)
         keep_len = keep_len.clamp(min=1)
 
-        # 6️⃣ Vectorized truncation (NO LOOP)
+        # 6. Vectorized truncation (NO LOOP)
         max_len = keep_len.max()
 
         if self.debug_route:
@@ -263,6 +285,7 @@ class TopkRouting(nn.Module):
         # truncate to max_len
         topk_score = topk_score[..., :max_len]
         topk_index = topk_index[..., :max_len]
+
         # position mask
         pos = torch.arange(max_len, device=topk_score.device)
         valid_mask = pos[None, None, :] < keep_len
@@ -271,8 +294,9 @@ class TopkRouting(nn.Module):
         topk_score = topk_score * valid_mask.to(topk_score.dtype)
         topk_index = topk_index.masked_fill(~valid_mask, 0)
 
-        #能量补偿
+        # energy compensation
         topk_score = topk_score * max_len * self.energy
+
         if self.debug_route:
             score_detached = topk_score.detach().float()
             valid_score = score_detached[valid_mask]
@@ -355,6 +379,7 @@ class TopkRouting(nn.Module):
                   f'max={attn_max:.6f} mean={attn_mean:.6f} '
                   f'sum_mean={attn_sum:.6f} gt_0.9_ratio={peak_ratio:.6f}')
 
+
 class KVGather(nn.Module):
     def __init__(self, mul_weight='none'):
         super().__init__()
@@ -370,25 +395,16 @@ class KVGather(nn.Module):
         Return:
             (n, p^2, topk, w^2, c_kq+c_v) tensor
         """
-        # select kv according to routing index
         n, p2, w2, c_kv = kv.size()
         topk = r_idx.size(-1)
-        # print(r_idx.size(), r_weight.size())
-        # FIXME: gather consumes much memory (topk times redundancy), write cuda kernel?
         topk_kv = torch.gather(kv.view(n, 1, p2, w2, c_kv).expand(-1, p2, -1, -1, -1),
-                               # (n, p^2, p^2, w^2, c_kv) without mem cpy
                                dim=2,
                                index=r_idx.view(n, p2, topk, 1, 1).expand(-1, -1, -1, w2, c_kv)
-                               # (n, p^2, k, w^2, c_kv)
                                )
-        # print("KV形状",topk_kv[0][0][0][0][0])
         if self.mul_weight == 'soft':
-            topk_kv = r_weight.view(n, p2, topk, 1, 1) * topk_kv  # (n, p^2, k, w^2, c_kv)
-            # print("KV形状",topk_kv[0][0][0][0][0])
+            topk_kv = r_weight.view(n, p2, topk, 1, 1) * topk_kv
         elif self.mul_weight == 'hard':
             raise NotImplementedError('differentiable hard routing TBA')
-        # else: #'none'
-        #     topk_kv = topk_kv # do nothing
 
         return topk_kv
 
@@ -403,26 +419,22 @@ class QKVLinear(nn.Module):
     def forward(self, x):
         q, kv = self.qkv(x).split([self.qk_dim, self.qk_dim + self.dim], dim=-1)
         return q, kv
-        # q, k, v = self.qkv(x).split([self.qk_dim, self.qk_dim, self.dim], dim=-1)
-        # return q, k, v
 
 
 class ToppAttention(nn.Module):
     """
-    n_win: number of windows in one side (so the actual number of windows is n_win*n_win)
-    kv_per_win: for kv_downsample_mode='ada_xxxpool' only, number of key/values per window. Similar to n_win, the actual number is kv_per_win*kv_per_win.
-    topk: topk for window filtering
-    param_attention: 'qkvo'-linear for q,k,v and o, 'none': param free attention
-    param_routing: extra linear for routing
-    diff_routing: wether to set routing differentiable
-    soft_routing: wether to multiply soft routing weights
+    Top-P attention with optional CUDA inference backend.
+
+    Training always uses the V1.1 PyTorch path.
+    Inference can optionally use the CUDA backend when
+    topp_flash_backend='cuda' is set in config.
     """
 
-    def __init__(self, dim,num_heads=8, n_win=7, qk_dim=None, qk_scale=None,
+    def __init__(self, dim, num_heads=8, n_win=7, qk_dim=None, qk_scale=None,
                  kv_per_win=4, kv_downsample_ratio=4, kv_downsample_kernel=None, kv_downsample_mode='identity',
                  topk=4, param_attention="qkvo", param_routing=False, diff_routing=False, soft_routing=True,
                  side_dwconv=3,
-                 auto_pad=False,W=False,
+                 auto_pad=False, W=False,
                  topp_flash_block_windows=64, topp_flash_backend=None,
                  use_pruned_kv_gather=False, pruned_kv_num_groups=1,
                  topp_route_configs=None,
@@ -441,13 +453,13 @@ class ToppAttention(nn.Module):
         self.qk_dim = qk_dim or dim
         assert self.qk_dim % num_heads == 0 and self.dim % num_heads == 0, 'qk_dim and dim must be divisible by num_heads!'
         self.scale = qk_scale or self.qk_dim ** -0.5
-        self.W=W
+        self.W = W
         self.topp_flash_block_windows = topp_flash_block_windows
         self.topp_flash_backend = _normalize_topp_backend(topp_flash_backend)
         self.use_pruned_kv_gather = use_pruned_kv_gather
         self.pruned_kv_num_groups = pruned_kv_num_groups
         self.topp_route_configs = topp_route_configs
-        self.attn_vis_config = attn_vis_config
+        self.attn_vis_config = _normalize_attn_vis_config(attn_vis_config)
         self.use_fast_attention = use_fast_attention
         self.topp_flash_debug = topp_flash_debug
         self._topp_flash_warned = False
@@ -467,15 +479,14 @@ class ToppAttention(nn.Module):
         self.diff_routing = diff_routing
         self.soft_routing = soft_routing
         self.use_route_mask = use_route_mask
-        self.W=W
+        self.W = W
         # router
-        assert not (self.param_routing and not self.diff_routing)  # cannot be with_param=True and diff_routing=False
+        assert not (self.param_routing and not self.diff_routing)
         self.router = TopkRouting(qk_dim=self.qk_dim,
                                   qk_scale=self.scale,
-
                                   topk=self.topk,
                                   diff_routing=self.diff_routing,
-                                  param_routing=self.param_routing,W=self.W,
+                                  param_routing=self.param_routing, W=self.W,
                                   route_configs=self.topp_route_configs,
                                   attn_vis_config=self.attn_vis_config,
                                   debug_route=debug_route,
@@ -518,19 +529,11 @@ class ToppAttention(nn.Module):
         elif self.kv_downsample_mode == 'identity':  # no kv downsampling
             self.kv_down = nn.Identity()
         elif self.kv_downsample_mode == 'fracpool':
-            # assert self.kv_downsample_ratio is not None
-            # assert self.kv_downsample_kenel is not None
-            # TODO: fracpool
-            # 1. kernel size should be input size dependent
-            # 2. there is a random factor, need to avoid independent sampling for k and v
             raise NotImplementedError('fracpool policy is not implemented yet!')
         elif self.kv_downsample_mode == 'conv':
-            # TODO: need to consider the case where k != v so that need two downsample modules
             raise NotImplementedError('conv policy is not implemented yet!')
         else:
-            raise ValueError(
-                f'kv_down_sample_mode {self.kv_downsample_mode} '
-                'is not supported!')
+            raise ValueError(f'kv_down_sample_mode {self.kv_downsample_mode} is not surpported!')
 
         # softmax for local attention
         self.attn_act = nn.Softmax(dim=-1)
@@ -547,7 +550,7 @@ class ToppAttention(nn.Module):
         k_route = 0.5 * (k.mean([2, 3]) + k.amax(dim=(2, 3)))
         return q_route, k_route
 
-    def forward(self, x,GA, ret_attn_mask=False):
+    def forward(self, x, GA, ret_attn_mask=False):
         """
         x: NHWC tensor
 
@@ -555,7 +558,6 @@ class ToppAttention(nn.Module):
             NHWC tensor
         """
         # NOTE: use padding for semantic segmentation
-        # 输入填充处理
         if self.auto_pad:
             N, H_in, W_in, C = x.size()
 
@@ -568,8 +570,10 @@ class ToppAttention(nn.Module):
             _, H, W, _ = x.size()  # padded size
         else:
             N, H, W, C = x.size()
-            assert H % self.n_win == 0 and W % self.n_win == 0  #
+            assert H % self.n_win == 0 and W % self.n_win == 0
         ###################################################
+
+        # Profiling setup (inference only)
         stage_debug = self.topp_flash_debug and not ret_attn_mask
         profile_key = (
             self.topp_flash_backend, tuple(x.shape), self.num_heads,
@@ -585,18 +589,13 @@ class ToppAttention(nn.Module):
                 stage_times[name] = elapsed
             return out
 
-        # patchify, (n, p^2, w, w, c), keep 2d window as we need 2d pooling to reduce kv size
+        # patchify, (n, p^2, w, w, c)
         x = rearrange(x, "n (j h) (i w) c -> n (j i) h w c", j=self.n_win, i=self.n_win)
 
         #################qkv projection###################
-        # q: (n, p^2, w, w, c_qk)
-        # kv: (n, p^2, w, w, c_qk+c_v)
-        # NOTE: separte kv if there were memory leak issue caused by gather
         q, kv = run_stage('qkv', lambda: self.qkv(x))
 
         # pixel-wise qkv
-        # q_pix: (n, p^2, w^2, c_qk)
-        # kv_pix: (n, p^2, h_kv*w_kv, c_qk+c_v)
         q_pix = rearrange(q, 'n p2 h w c -> n p2 (h w) c')
         kv_pix = run_stage(
             'kv_down',
@@ -607,8 +606,6 @@ class ToppAttention(nn.Module):
         q_win, k_win = self._pool_route_tokens(q, kv)
 
         ##################side_dwconv(lepe)##################
-        # NOTE: call contiguous to avoid gradient warning when using ddp
-        # 对值部分应用深度可分离卷积作为位置编码
         lepe = run_stage(
             'lepe',
             lambda: self.lepe(
@@ -618,6 +615,7 @@ class ToppAttention(nn.Module):
 
         ############ gather q dependent k/v #################
 
+        # ==================== CUDA inference path ====================
         if _use_topp_cuda_backend(self.topp_flash_backend) and not ret_attn_mask:
             if self.training:
                 raise RuntimeError(
@@ -699,55 +697,31 @@ class ToppAttention(nn.Module):
             log_path = f'topp_flash_{self.topp_flash_backend or "torch"}'
             if full_route:
                 log_path = f'{log_path}_full_last'
-            if stage_profile:
+            if stage_debug:
                 _log_topp_stage_debug(
                     log_path, x, q_pix, kv_pix, r_idx,
                     stage_times, self.num_heads, self.qk_dim, self.dim,
                     self.n_win)
             return out
 
-        # 路由机制
+        # ==================== Standard PyTorch path (V1.1 training) ====================
         r_weight, r_idx, r_mask = run_stage(
             'router',
-            lambda: self.router(q_win, k_win,GA))  # all are (n, p^2, topk) tensors
-
-        if self.use_pruned_kv_gather and not ret_attn_mask:
-            out = self._attention_with_pruned_kv_gather(
-                q_pix=q_pix,
-                kv_pix=kv_pix,
-                r_weight=r_weight,
-                r_idx=r_idx,
-                r_mask=r_mask,
-                H=H,
-                W=W)
-            out = out + lepe
-            out = self.wo(out)
-            if self.auto_pad and (pad_r > 0 or pad_b > 0):
-                out = out[:, :H_in, :W_in, :].contiguous()
-            return out
-
-        if self.use_fast_attention and not ret_attn_mask:
-            return self._attention_fast(
-                q_pix=q_pix, kv_pix=kv_pix,
-                r_weight=r_weight, r_idx=r_idx, r_mask=r_mask,
-                H=H, W=W, lepe=lepe, H_in=H_in, W_in=W_in,
-                pad_r=pad_r, pad_b=pad_b)
+            lambda: self.router(q_win, k_win, GA))  # (n, p^2, topk) tensors
 
         kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
         k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)
-        # kv_pix_sel: (n, p^2, topk, h_kv*w_kv, c_qk)
-        # v_pix_sel: (n, p^2, topk, h_kv*w_kv, c_v)
 
         ######### do attention as normal ####################
         k_pix_sel = rearrange(k_pix_sel, 'n p2 k w2 (m c) -> (n p2) m c (k w2)',
-                              m=self.num_heads)  # flatten to BMLC, (n*p^2, m, topk*h_kv*w_kv, c_kq//m) transpose here?
+                              m=self.num_heads)
         v_pix_sel = rearrange(v_pix_sel, 'n p2 k w2 (m c) -> (n p2) m (k w2) c',
-                              m=self.num_heads)  # flatten to BMLC, (n*p^2, m, topk*h_kv*w_kv, c_v//m)
+                              m=self.num_heads)
         q_pix = rearrange(q_pix, 'n p2 w2 (m c) -> (n p2) m w2 c',
-                          m=self.num_heads)  # to BMLC tensor (n*p^2, m, w^2, c_qk//m)
+                          m=self.num_heads)
 
-        # param-free multihead attention    —— 注意力计算
-        attn_weight = (q_pix * self.scale) @ k_pix_sel  # (n*p^2, m, w^2, c) @ (n*p^2, m, c, topk*h_kv*w_kv) -> (n*p^2, m, w^2, topk*h_kv*w_kv)
+        # param-free multihead attention
+        attn_weight = (q_pix * self.scale) @ k_pix_sel
         if self.use_route_mask:
             route_mask = r_mask[..., None].expand(-1, -1, -1, kv_pix_sel.size(-2))
             route_mask = rearrange(route_mask, 'n p2 k w2 -> (n p2) 1 1 (k w2)')
@@ -755,7 +729,7 @@ class ToppAttention(nn.Module):
                 ~route_mask, torch.finfo(attn_weight.dtype).min)
         attn_weight = self.attn_act(attn_weight)
         self.router._debug_print_attn_weight(attn_weight, 'torch')
-        out = attn_weight @ v_pix_sel  # (n*p^2, m, w^2, topk*h_kv*w_kv) @ (n*p^2, m, topk*h_kv*w_kv, c) -> (n*p^2, m, w^2, c)
+        out = attn_weight @ v_pix_sel
         out = rearrange(out, '(n j i) m (h w) c -> n (j h) (i w) (m c)', j=self.n_win, i=self.n_win,
                         h=H // self.n_win, w=W // self.n_win)
 
@@ -772,123 +746,3 @@ class ToppAttention(nn.Module):
             return out, r_weight, r_idx, attn_weight
         else:
             return out
-
-    def _attention_with_pruned_kv_gather(self, q_pix: Tensor, kv_pix: Tensor,
-                                         r_weight: Tensor, r_idx: Tensor,
-                                         r_mask: Tensor, H: int,
-                                         W: int) -> Tensor:
-        n, p2, q_len, _ = q_pix.shape
-        _, _, kv_len, c_kv = kv_pix.shape
-        flat_size = n * p2
-        topk = r_idx.size(-1)
-        head_q = self.qk_dim // self.num_heads
-        head_v = self.dim // self.num_heads
-        num_groups = max(1, min(int(self.pruned_kv_num_groups), topk))
-
-        keep_len = r_mask.sum(dim=-1).reshape(flat_size).long().clamp(min=1)
-        q_flat = rearrange(q_pix, 'n p2 w2 (m c) -> (n p2) m w2 c',
-                           m=self.num_heads)
-        idx_flat = r_idx.reshape(flat_size, topk).long()
-        weight_flat = r_weight.reshape(flat_size, topk).to(kv_pix.dtype)
-        out_flat = q_flat.new_empty(flat_size, self.num_heads, q_len, head_v)
-
-        sorted_keep, sorted_idx = torch.sort(keep_len)
-        boundaries = torch.linspace(0, 1, num_groups + 1,
-                                    device=keep_len.device)
-        quantiles = torch.quantile(keep_len.float(), boundaries).long().clamp(
-            min=1, max=topk)
-        quantiles[-1] = topk
-        all_bounds = torch.stack([quantiles[:-1], quantiles[1:] + 1]).T
-        edges = torch.searchsorted(sorted_keep, all_bounds.flatten())
-        edges_cpu = edges.cpu().tolist()
-
-        for g in range(num_groups):
-            left = edges_cpu[2 * g]
-            right = edges_cpu[2 * g + 1]
-            flat_ids = sorted_idx[left:right]
-            if flat_ids.numel() == 0:
-                continue
-
-            group_keep = keep_len.index_select(0, flat_ids)
-            group_max_keep = int(group_keep.max().item())
-            n_ids = torch.div(flat_ids, p2, rounding_mode='floor')
-            kept_b_idx = idx_flat.index_select(0, flat_ids)[:, :group_max_keep]
-            q = q_flat.index_select(0, flat_ids)
-            kv_batch = kv_pix.index_select(0, n_ids)
-            group_col = torch.arange(group_max_keep, device=q_pix.device)
-
-            kv_sel = torch.gather(
-                kv_batch,
-                dim=1,
-                index=kept_b_idx[:, :, None, None].expand(-1, -1, kv_len,
-                                                          c_kv))
-            weight = weight_flat.index_select(0, flat_ids)[:, :group_max_keep]
-            kv_sel = weight[:, :, None, None] * kv_sel
-            k_sel, v_sel = kv_sel.split([self.qk_dim, self.dim], dim=-1)
-
-            k_sel = k_sel.view(-1, group_max_keep, kv_len, self.num_heads,
-                               head_q).permute(0, 3, 4, 1, 2)
-            v_sel = v_sel.view(-1, group_max_keep, kv_len, self.num_heads,
-                               head_v).permute(0, 3, 1, 2, 4)
-
-            q = q * self.scale
-            mask_group = torch.zeros(q.size(0), group_max_keep,
-                                     device=q.device, dtype=kv_pix.dtype)
-            mask_group.masked_fill_(
-                group_col >= group_keep[:, None],
-                float('-inf'))
-            mask = mask_group[:, :, None].expand(-1, -1, kv_len).reshape(
-                q.size(0), -1).unsqueeze(1).unsqueeze(1)
-            attn = self.attn_act(q @ k_sel.flatten(3) + mask)
-            out_chunk = attn @ v_sel.reshape(
-                -1, self.num_heads, group_max_keep * kv_len, head_v)
-
-            out_flat.index_copy_(0, flat_ids, out_chunk)
-
-        return rearrange(
-            out_flat,
-            '(n j i) m (h w) c -> n (j h) (i w) (m c)',
-            n=n,
-            j=self.n_win,
-            i=self.n_win,
-            h=H // self.n_win,
-            w=W // self.n_win)
-
-    def _attention_fast(self, q_pix, kv_pix, r_weight, r_idx, r_mask,
-                        H, W, lepe, H_in, W_in, pad_r, pad_b):
-        keep_len = r_mask.sum(dim=-1)
-        keep_max = int(keep_len.max().clamp(min=1).item())
-        topk = r_idx.size(-1)
-        keep_max = min(keep_max, topk)
-
-        r_idx_f = r_idx[:, :, :keep_max]
-        r_weight_f = r_weight[:, :, :keep_max]
-        r_mask_f = r_mask[:, :, :keep_max]
-
-        kv_pix_sel = self.kv_gather(r_idx=r_idx_f, r_weight=r_weight_f, kv=kv_pix)
-        k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)
-
-        k_pix_sel = rearrange(k_pix_sel, 'n p2 k w2 (m c) -> (n p2) m c (k w2)',
-                              m=self.num_heads)
-        v_pix_sel = rearrange(v_pix_sel, 'n p2 k w2 (m c) -> (n p2) m (k w2) c',
-                              m=self.num_heads)
-        q_pix = rearrange(q_pix, 'n p2 w2 (m c) -> (n p2) m w2 c',
-                          m=self.num_heads)
-
-        attn_weight = (q_pix * self.scale) @ k_pix_sel
-        route_mask = r_mask_f[..., None].expand(-1, -1, -1, kv_pix.size(-2))
-        route_mask = rearrange(route_mask, 'n p2 k w2 -> (n p2) 1 1 (k w2)')
-        attn_weight = attn_weight.masked_fill(
-            ~route_mask, torch.finfo(attn_weight.dtype).min)
-        attn_weight = self.attn_act(attn_weight)
-        self.router._debug_print_attn_weight(attn_weight, 'fast')
-        out = attn_weight @ v_pix_sel
-        out = rearrange(out, '(n j i) m (h w) c -> n (j h) (i w) (m c)',
-                        j=self.n_win, i=self.n_win,
-                        h=H // self.n_win, w=W // self.n_win)
-
-        out = out + lepe
-        out = self.wo(out)
-        if self.auto_pad and (pad_r > 0 or pad_b > 0):
-            out = out[:, :H_in, :W_in, :].contiguous()
-        return out

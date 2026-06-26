@@ -3,8 +3,6 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 from torch.nn.utils.fusion import fuse_conv_bn_eval
-# from .hys_Nex_21_6 import BiFormer
-# from .biformer import BiFormer
 from .bi_topp_vote import VTFormer
 from ..utils.topp_flash_kernel import _load_cuda_extension
 from timm.models.layers import LayerNorm2d
@@ -12,119 +10,37 @@ from mmengine.runner import load_checkpoint
 import os
 import warnings
 import numpy as np
-import cv2 
+import cv2
 from PIL import Image
+import torch
 import torch.nn.functional as F
-
-
-_TOPP_BRANCH_STAGE_LOGGED = set()
-
-
-def _can_parallel_branches(x, cnn_x, stage_profile, feature_vis_enabled):
-    return (not stage_profile and not feature_vis_enabled
-            and torch.cuda.is_available() and x.is_cuda and cnn_x.is_cuda
-            and x.device == cnn_x.device)
-
-
-def _time_cuda_wall(enabled, tensor, fn):
-    if not enabled or not torch.cuda.is_available() or not tensor.is_cuda:
-        return fn(), None
-    with torch.cuda.device(tensor.device):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        torch.cuda.synchronize(tensor.device)
-        start.record()
-        out = fn()
-        end.record()
-        end.synchronize()
-        return out, start.elapsed_time(end)
-
-
-def _log_topp_branch_stage_debug(stage, x_shape, cnn_shape, out_shape, times):
-    key = (stage, x_shape, cnn_shape, out_shape)
-    if key in _TOPP_BRANCH_STAGE_LOGGED:
-        return
-    _TOPP_BRANCH_STAGE_LOGGED.add(key)
-    parts = ' '.join(
-        f'{name}={int(elapsed)}' if name == 'blocks'
-        else f'{name}={elapsed:.4f}ms'
-        for name, elapsed in times.items())
-    print(
-        '[PVSA TopP Stage] '
-        f'path=backbone_fusion stage={stage} '
-        f'x={x_shape} cnn={cnn_shape} out={out_shape} {parts}')
-
-
-def _run_with_optional_wall_time(enabled, tensor, times, name, fn):
-    out, elapsed = _time_cuda_wall(enabled, tensor, fn)
-    if elapsed is not None:
-        times[name] = elapsed
-    return out
-
-
 @MODELS.register_module()
 class BiFormer_fusion(VTFormer):
-    def __init__(self,
-                 pretrained=None,
-                 topp_flash_backend=None,
-                 topp_flash_block_windows=64,
-                 topp_flash_debug=False,
-                 use_pruned_kv_gather=False,
-                 feature_vis_config=None,
-                 **kwargs):
-        try:
-            super().__init__(
-                topp_flash_backend=topp_flash_backend,
-                topp_flash_block_windows=topp_flash_block_windows,
-                topp_flash_debug=topp_flash_debug,
-                use_pruned_kv_gather=use_pruned_kv_gather,
-                **kwargs)
-        except TypeError as exc:
-            flash_args = (
-                'topp_flash_backend',
-                'topp_flash_block_windows',
-                'topp_flash_debug',
-                'use_pruned_kv_gather',
-            )
-            if not any(arg in str(exc) for arg in flash_args):
-                raise
-            if (topp_flash_backend is not None or topp_flash_debug
-                    or use_pruned_kv_gather):
-                warnings.warn(
-                    '当前 VTFormer 不支持 Top-P CUDA 参数，已降级为普通注意力路径。')
-            super().__init__(**kwargs)
-        self.topp_flash_debug = topp_flash_debug
+    def __init__(self, pretrained=None, **kwargs):
+        super().__init__(**kwargs)
         self.extra_norms = nn.ModuleList()
-        self.bn11 = nn.ModuleList()
-        self.bn12 = nn.ModuleList()
+        self.bn = nn.ModuleList()
         self.conv12=nn.ModuleList()
         self.conv11=nn.ModuleList()
-        self.fusion = nn.ModuleList()
         for i in range(4):
             self.extra_norms.append(LayerNorm2d(self.embed_dim[i]))
-            self.bn11.append(nn.BatchNorm2d(self.embed_dim[i]))
-            self.bn12.append(nn.BatchNorm2d(self.embed_dim[i]))
+            self.bn.append(nn.BatchNorm2d(self.embed_dim[i]))
             self.conv12.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
             self.conv11.append(nn.Conv2d(2*self.embed_dim[i],self.embed_dim[i],1,1,0))
-            self.fusion.append(
-                nn.Conv2d(2*self.embed_dim[i], self.embed_dim[i], kernel_size=(1,1), stride=(1, 1), padding=(0, 0), bias=True))
             
             
         self.apply(self._init_weights)
         self.init_weights(pretrained=pretrained)
         nn.SyncBatchNorm.convert_sync_batchnorm(self)
         self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        # self.upsample4 = nn.Upsample(scale_factor=4, mode='bilinear', align_corners=False)
+        # self.upsample8 = nn.Upsample(scale_factor=8, mode='bilinear', align_corners=False)
+        # self.pool2=nn.AvgPool2d(kernel_size=2, stride=2)
+        # self.pool4=nn.AvgPool2d(kernel_size=4, stride=4)
+        # self.pool8=nn.AvgPool2d(kernel_size=8, stride=8)
+        # self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
         self.sigmoid = nn.Sigmoid()
-        default_feature_vis_config = dict(
-            enabled=False,
-            save_dir='cam/features_imgs4',
-            out_size=512,
-            channel_reduce='mean')
-        if feature_vis_config:
-            default_feature_vis_config.update(feature_vis_config)
-        self.feature_vis_config = default_feature_vis_config
-        self._branch_inference_fused = False
-        self._parallel_branch_streams = {}
+        
 
 
     def init_weights(self, pretrained=None):
@@ -143,141 +59,54 @@ class BiFormer_fusion(VTFormer):
         else:
             raise TypeError(f'pretrained must be a str or None, but got {type(pretrained)}')
 
-    def optimize_for_inference(self):
-        super().optimize_for_inference()
-        if (self.training or self._branch_inference_fused
-                or self._disable_inference_fusion):
-            return
-        for idx in range(len(self.conv11)):
-            bn11 = self.bn11[idx]
-            if isinstance(bn11, nn.modules.batchnorm._BatchNorm) and not bn11.training:
-                self.conv11[idx] = fuse_conv_bn_eval(self.conv11[idx], bn11)
-                self.bn11[idx] = nn.Identity()
-            bn12 = self.bn12[idx]
-            if isinstance(bn12, nn.modules.batchnorm._BatchNorm) and not bn12.training:
-                self.conv12[idx] = fuse_conv_bn_eval(self.conv12[idx], bn12)
-                self.bn12[idx] = nn.Identity()
-        if self.topp_flash_backend in ('cuda', 'cuda_forward'):
-            _load_cuda_extension()
-        self._branch_inference_fused = True
-
 
     def forward_features(self, x: torch.Tensor):
         if not self.training:
             self.optimize_for_inference()
         out = []
         cnn_encoder_out = x
-        stage_profile = self.topp_flash_debug
 
-        feature_vis_enabled = self.feature_vis_config.get('enabled', False)
-        save_dir = self.feature_vis_config.get('save_dir', 'cam/features_imgs4')
-        if feature_vis_enabled:
-            os.makedirs(save_dir, exist_ok=True)
+        # 保存图片的目录
+        flag=0
+        save_dir = 'cam/features_imgs4'
+        os.makedirs(save_dir, exist_ok=True)
         channel1=[]
         channel2=[]
         channel3=[]
-
-        def run_parallel_branches(stage_idx, trans_x, cnn_x):
-            if not _can_parallel_branches(
-                    trans_x, cnn_x, False, feature_vis_enabled):
-                next_cnn = self.downsample_layers2[stage_idx](cnn_x)
-                next_trans = self.downsample_layers[stage_idx](trans_x)
-                next_trans = self.stages[stage_idx](next_trans)
-                return next_trans, next_cnn
-
-            trans_stream = torch.cuda.current_stream(trans_x.device)
-            stream_key = (cnn_x.device.type, cnn_x.device.index, stage_idx)
-            cnn_stream = self._parallel_branch_streams.get(stream_key)
-            if cnn_stream is None:
-                cnn_stream = torch.cuda.Stream(device=cnn_x.device)
-                self._parallel_branch_streams[stream_key] = cnn_stream
-            with torch.cuda.stream(cnn_stream):
-                next_cnn = self.downsample_layers2[stage_idx](cnn_x)
-            next_trans = self.downsample_layers[stage_idx](trans_x)
-            next_trans = self.stages[stage_idx](next_trans)
-            trans_stream.wait_stream(cnn_stream)
-            next_cnn.record_stream(trans_stream)
-            return next_trans, next_cnn
-
         for i in range(4):
-            stage_times = {}
-            stage_input_shape = tuple(x.shape)
-            if feature_vis_enabled:
+            if flag==1:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_xinput.png')
-            def run_stage_body(i=i):
-                nonlocal x, cnn_encoder_out
-                x, cnn_encoder_out = run_parallel_branches(
-                    i, x, cnn_encoder_out)
-                return x, cnn_encoder_out
-
-            _, stage_wall = _time_cuda_wall(
-                stage_profile, x, run_stage_body)
-            if stage_wall is not None:
-                stage_times['blocks'] = float(len(self.stages[i]))
-                stage_times['stage_total_wall'] = stage_wall
-            if feature_vis_enabled:
+            cnn_encoder_out = self.downsample_layers2[i](cnn_encoder_out)
+            x = self.downsample_layers[i](x)
+            x = self.stages[i](x)
+            if flag==1:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_before_FAM_x.png')
                 self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_before_FAM_cnn.png')
-            if i in self.fam_stages:
-                x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)
+
+            x, cnn_encoder_out = self.FAM[i](x, cnn_encoder_out)
             channel1.append(x)
             channel2.append(cnn_encoder_out)
 
-            if feature_vis_enabled:
+            if flag==1:
                 self._save_feature_channel_as_image(x, f'{save_dir}/stage{i}_after_FAM_x.png')
                 self._save_feature_channel_as_image(cnn_encoder_out, f'{save_dir}/stage{i}_after_FAM_cnn.png')
-            if stage_times:
-                _log_topp_branch_stage_debug(
-                    i, stage_input_shape, tuple(cnn_encoder_out.shape),
-                    tuple(x.shape), stage_times)
 
-        # 基础融合：通道拼接 + 1x1 卷积
         for i in range(4):
-            stage_times = {}
-            fused = _run_with_optional_wall_time(
-                stage_profile, channel1[i], stage_times, 'fusion_base',
-                lambda i=i: self.fusion[i](torch.cat((channel1[i], channel2[i]), dim=1)))
-            channel3.append(fused)
-            if stage_times:
-                _log_topp_branch_stage_debug(
-                    f'fusion{i}', tuple(channel1[i].shape),
-                    tuple(channel2[i].shape), tuple(fused.shape),
-                    stage_times)
-        # Mask 融合：用深层特征生成掩码，调制当前层
+            channel3.append(self.fusion[i](torch.cat((channel1[i], channel2[i]), dim=1)))  # dim=1 表示按通道拼接
         for i in range(3):
-            stage_times = {}
-            C1 = _run_with_optional_wall_time(
-                stage_profile, channel1[i + 1], stage_times, 'mask_conv1',
-                lambda i=i: self.conv11[i](channel1[i + 1]))
-            C2 = _run_with_optional_wall_time(
-                stage_profile, channel2[i + 1], stage_times, 'mask_conv2',
-                lambda i=i: self.conv12[i](channel2[i + 1]))
-            bn_channel1 = _run_with_optional_wall_time(
-                stage_profile, C1, stage_times, 'mask_bn1',
-                lambda i=i: self.sigmoid(self.bn11[i](C1)))
-            bn_channel2 = _run_with_optional_wall_time(
-                stage_profile, C2, stage_times, 'mask_bn2',
-                lambda i=i: self.sigmoid(self.bn12[i](C2)))
-            if feature_vis_enabled and i==0:
+            C1=self.conv11[i](channel1[i + 1])
+            C2=self.conv12[i](channel2[i + 1])
+            bn_channel1 = self.sigmoid(self.bn[i](C1))
+            bn_channel2 = self.sigmoid(self.bn[i](C2))
+            if flag==1 and i==0:
                 self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{save_dir}/mask1.png')
                 self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{save_dir}/mask2.png')
-            channel3[i] = _run_with_optional_wall_time(
-                stage_profile, channel3[i], stage_times, 'mask_fusion',
-                lambda i=i: channel3[i] + self.upsample2(bn_channel1) * channel3[i] + self.upsample2(bn_channel2) * channel3[i])
-
+            channel3[i] = channel3[i] + self.upsample2(bn_channel1) * channel3[i] + self.upsample2(bn_channel2) * channel3[i]
+        
         for i in range(4):
-            if feature_vis_enabled:
+            if flag==1:
                 self._save_feature_channel_as_image(channel3[i], f'{save_dir}/stage{i}_after_channel.png')
-            stage_times = {}
-            normed = _run_with_optional_wall_time(
-                stage_profile, channel3[i], stage_times, 'out_norm',
-                lambda i=i: self.extra_norms[i](channel3[i]))
-            out.append(normed)
-            if stage_times:
-                _log_topp_branch_stage_debug(
-                    f'out{i}', tuple(channel3[i].shape),
-                    tuple(channel3[i].shape), tuple(normed.shape),
-                    stage_times)
+            out.append(self.extra_norms[i](channel3[i]))
         return tuple(out)
 
 
@@ -286,8 +115,8 @@ class BiFormer_fusion(VTFormer):
         self,
         feature_map,
         file_path,
-        out_size=None,        # (H, W)，如 (512, 512)
-        channel_reduce=None # "mean" | "max"
+        out_size=512,        # (H, W)，如 (512, 512)
+        channel_reduce="mean" # "mean" | "max"
     ):
         """
         feature_map: [B, C, H, W] or [C, H, W]
@@ -295,11 +124,6 @@ class BiFormer_fusion(VTFormer):
         out_size: 上采样到的空间尺寸 (H, W)，None 表示不变
         channel_reduce: 通道聚合方式
         """
-
-        if out_size is None:
-            out_size = self.feature_vis_config.get('out_size', 512)
-        if channel_reduce is None:
-            channel_reduce = self.feature_vis_config.get('channel_reduce', 'mean')
 
         # ---------- 1. 维度统一 ----------
         if feature_map.dim() == 4:
@@ -337,6 +161,23 @@ class BiFormer_fusion(VTFormer):
         img_color = (cmap(fmap)[:, :, :3] * 255).astype(np.uint8)
         # ---------- 8. 保存 ----------
         Image.fromarray(img_color).save(file_path)
+
+    def optimize_for_inference(self):
+        if self.training:
+            return
+        # Fallback guard: skip if parent already fused
+        if getattr(self, '_inference_fused', False):
+            return
+        # Fuse parent (VTFormer) conv-bn layers
+        super().optimize_for_inference()
+        for idx in range(len(self.conv11)):
+            bn = self.bn[idx]
+            if isinstance(bn, nn.modules.batchnorm._BatchNorm) and not bn.training:
+                self.conv11[idx] = fuse_conv_bn_eval(self.conv11[idx], bn)
+                self.bn[idx] = nn.Identity()
+        if getattr(self, 'topp_flash_backend', None) in ('cuda', 'cuda_forward'):
+            _load_cuda_extension()
+
     def forward(self, x: torch.Tensor):
         return self.forward_features(x)
 
