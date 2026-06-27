@@ -31,8 +31,8 @@ model = dict(
         auto_pad=True,
         # FAM 空间注意力降维比例（1=无降维，4=压缩到1/4通道）
         fam_reduction=4,
-        # CNN 分支各层 DWConv block 数量：[stem, stage1, stage2, stage3]
-        cnn_dwconv_layers=[2, 1, 2, 1],
+        # CNN 分支各层 block 数量：[stem, stage1, stage2, stage3]
+        cnn_block_layers=[2, 1, 2, 1],
         # CNN block 类型：'dwconv'（GELU+线性瓶颈）或 'mbblock'（ReLU6+6x扩展）
         cnn_block_type='dwconv',
         # CUDA 推理后端

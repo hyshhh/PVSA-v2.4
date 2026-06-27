@@ -471,7 +471,7 @@ class VTFormer(nn.Module):
                  use_route_mask=False,
                  use_nan_guard=False,
                  fam_reduction=4,
-                 cnn_dwconv_layers=[2, 1, 2, 1],
+                 cnn_block_layers=[2, 1, 2, 1],
                  cnn_block_type='dwconv',
                  feature_vis_config=None,
                  **kwargs):
@@ -526,7 +526,7 @@ class VTFormer(nn.Module):
         ]
         stem2_layers.extend([
             _make_cnn_block(embed_dim[0])
-            for _ in range(cnn_dwconv_layers[0])
+            for _ in range(cnn_block_layers[0])
         ])
         stem2 = nn.Sequential(*stem2_layers)
 
@@ -558,7 +558,7 @@ class VTFormer(nn.Module):
             ]
             layers.extend([
             _make_cnn_block(embed_dim[i + 1])
-            for _ in range(cnn_dwconv_layers[i + 1])
+            for _ in range(cnn_block_layers[i + 1])
              ])
             downsample_layer2 = nn.Sequential(*layers)
             #VTFormer1.4 1   v1.5-3
