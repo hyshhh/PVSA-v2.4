@@ -301,6 +301,50 @@ class DepthWiseConvModule(nn.Module):
         if self.downsample is not None:
             _fuse_sequential_conv_bn(self.downsample)
 
+class MBBlock(nn.Module):
+    """MobileNetV2 倒残差块：升维→深度卷积→降维，ReLU6 激活"""
+    def __init__(self, embed_dims, feedforward_channels, output_channels,
+                 kernel_size=3, stride=1, drop_rate=0.):
+        super().__init__()
+        padding = kernel_size // 2
+        # 升维
+        self.fc1 = nn.Conv2d(embed_dims, feedforward_channels, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(feedforward_channels)
+        # 深度卷积
+        self.pe_conv = nn.Conv2d(feedforward_channels, feedforward_channels,
+                                 kernel_size, stride, padding,
+                                 groups=feedforward_channels, bias=False)
+        self.bn2 = nn.BatchNorm2d(feedforward_channels)
+        # 降维
+        self.fc2 = nn.Conv2d(feedforward_channels, output_channels, 1, bias=False)
+        self.bn3 = nn.BatchNorm2d(output_channels)
+        self.activate = nn.ReLU6(inplace=True)
+        self.drop = nn.Dropout(drop_rate)
+        # 残差
+        self.downsample = None
+        if stride != 1 or embed_dims != output_channels:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(embed_dims, output_channels, 1, stride, bias=False),
+                nn.BatchNorm2d(output_channels))
+
+    def forward(self, x):
+        identity = x
+        out = self.activate(self.bn1(self.fc1(x)))
+        out = self.activate(self.bn2(self.pe_conv(out)))
+        out = self.drop(self.bn3(self.fc2(out)))
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        return out + identity
+
+    def fuse_for_inference(self):
+        if self.training:
+            return
+        self.fc1, self.bn1 = _fuse_conv_bn(self.fc1, self.bn1)
+        self.pe_conv, self.bn2 = _fuse_conv_bn(self.pe_conv, self.bn2)
+        self.fc2, self.bn3 = _fuse_conv_bn(self.fc2, self.bn3)
+        if self.downsample is not None:
+            _fuse_sequential_conv_bn(self.downsample)
+
 class ChannelWeights(nn.Module):
     def __init__(self, dim, reduction=1):
         super(ChannelWeights, self).__init__()
@@ -428,6 +472,7 @@ class VTFormer(nn.Module):
                  use_nan_guard=False,
                  fam_reduction=4,
                  cnn_dwconv_layers=[2, 1, 2, 1],
+                 cnn_block_type='dwconv',
                  feature_vis_config=None,
                  **kwargs):
 
@@ -451,6 +496,13 @@ class VTFormer(nn.Module):
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.norm_eval = norm_eval
         ############ downsample layers (patch embeddings) ######################
+        # CNN block 工厂函数
+        expansion = 6 if cnn_block_type == 'mbblock' else 4
+        def _make_cnn_block(ch):
+            if cnn_block_type == 'mbblock':
+                return MBBlock(ch, expansion * ch, ch)
+            return DepthWiseConvModule(ch, expansion * ch, ch)
+
         self.downsample_layers = nn.ModuleList()
         self.downsample_layers2 = nn.ModuleList()
         self.FAM = nn.ModuleList()
@@ -473,7 +525,7 @@ class VTFormer(nn.Module):
             nn.BatchNorm2d(embed_dim[0]),
         ]
         stem2_layers.extend([
-            DepthWiseConvModule(embed_dim[0], 4*embed_dim[0], embed_dim[0], 3, 1, 1)
+            _make_cnn_block(embed_dim[0])
             for _ in range(cnn_dwconv_layers[0])
         ])
         stem2 = nn.Sequential(*stem2_layers)
@@ -505,7 +557,7 @@ class VTFormer(nn.Module):
                 nn.BatchNorm2d(embed_dim[i + 1])
             ]
             layers.extend([
-            DepthWiseConvModule(embed_dim[i + 1], 4 * embed_dim[i + 1], embed_dim[i + 1], 3, 1, 1)
+            _make_cnn_block(embed_dim[i + 1])
             for _ in range(cnn_dwconv_layers[i + 1])
              ])
             downsample_layer2 = nn.Sequential(*layers)
@@ -626,7 +678,7 @@ class VTFormer(nn.Module):
         for layer in self.downsample_layers2:
             _fuse_sequential_conv_bn(layer)
         for module in self.modules():
-            if isinstance(module, DepthWiseConvModule):
+            if isinstance(module, (DepthWiseConvModule, MBBlock)):
                 module.fuse_for_inference()
         self._inference_fused = True
 
