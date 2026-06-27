@@ -63,19 +63,18 @@ def _format_params(value):
 
 
 def _stage_prefixes(backbone, stage):
-    fam_stages = set(getattr(backbone, 'fam_stages', (0, 1, 2, 3)))
-    fusion_stages = set(getattr(backbone, 'fusion_stages', (0, 1, 2, 3)))
     prefixes = {
         'cnn': [f'downsample_layers2.{stage}'],
         'transformer': [f'downsample_layers.{stage}', f'stages.{stage}'],
-        'FAM': [f'FAM.{stage}'] if stage in fam_stages else [],
+        'FAM': [f'FAM.{stage}'],
         'vote_fusion': [],
         'out_norm': [f'extra_norms.{stage}'],
     }
-    if stage in fusion_stages:
+    # mask 融合相关模块（stage 0-2 有 conv11/conv12/bn）
+    if stage < 3:
         prefixes['vote_fusion'].extend([
             f'conv11.{stage}', f'conv12.{stage}',
-            f'bn11.{stage}', f'bn12.{stage}',
+            f'bn.{stage}', f'fusion.{stage}',
         ])
     return prefixes
 
