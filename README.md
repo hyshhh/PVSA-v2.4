@@ -19,6 +19,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
 ```
 ## 原始路径推理
 ```bash
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
@@ -36,6 +37,7 @@ python tools/analysis_tools/pvsa_stage_complexity.py \
 ```
 ## 推理并保存分割结果
 ```bash
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
 CUDA_VISIBLE_DEVICES=0 python tools/test.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v1/work_dirs/1/epoch_8.pth \
