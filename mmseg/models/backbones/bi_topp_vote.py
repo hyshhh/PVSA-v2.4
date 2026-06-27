@@ -282,7 +282,7 @@ class DepthWiseConvModule(nn.Module):
         out = self.activate(out) # 升维后激活
         out = self.pe_conv(out)
         out = self.bn2(out)
-        out = self.activate(out) # 深度卷积后激活
+        # 深度卷积后不激活（标准 MobileNetV2 线性瓶颈层）
         out = self.fc2(out)
         out = self.bn3(out)
         # 最后通常不激活，直接做 Dropout 和 Add
