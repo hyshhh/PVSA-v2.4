@@ -104,10 +104,12 @@ class BiFormer_fusion(VTFormer):
             C2=self.conv12[i](channel2[i + 1])
             bn_channel1 = self.sigmoid(self.bn[i](C1))
             bn_channel2 = self.sigmoid(self.bn[i](C2))
+            mask1 = self.upsample2(bn_channel1)
+            mask2 = self.upsample2(bn_channel2)
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)) and i==0:
-                self._save_feature_channel_as_image(self.upsample2(bn_channel1), f'{vis_dir}/mask1.png', vis_out_size, vis_reduce)
-                self._save_feature_channel_as_image(self.upsample2(bn_channel2), f'{vis_dir}/mask2.png', vis_out_size, vis_reduce)
-            channel3[i] = channel3[i] + self.upsample2(bn_channel1) * channel3[i] + self.upsample2(bn_channel2) * channel3[i]
+                self._save_feature_channel_as_image(mask1, f'{vis_dir}/mask1.png', vis_out_size, vis_reduce)
+                self._save_feature_channel_as_image(mask2, f'{vis_dir}/mask2.png', vis_out_size, vis_reduce)
+            channel3[i] = channel3[i] * (1 + mask1 + mask2)
 
         for i in range(4):
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
