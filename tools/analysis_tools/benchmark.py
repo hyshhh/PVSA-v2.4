@@ -37,8 +37,39 @@ def parse_args():
         'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
         'Note that the quotation marks are necessary and that no white space '
         'is allowed.')
+    parser.add_argument(
+        '--cudnn-benchmark',
+        action='store_true',
+        default=None,
+        help='enable torch.backends.cudnn.benchmark for faster inference '
+        '(fixed input shape only). Default: keep config env setting.')
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=None,
+        help='override test_dataloader.batch_size (throughput test).')
+    parser.add_argument(
+        '--input-size',
+        type=int,
+        nargs=2,
+        metavar=('H', 'W'),
+        default=None,
+        help='override test input resolution, e.g. --input-size 512 512. '
+        'Also updates data_preprocessor size and Resize pipeline.')
     args = parser.parse_args()
     return args
+
+
+def _apply_input_size(pipeline, size):
+    """覆盖 test pipeline 的 Resize scale，并把 data_preprocessor 的
+    size 一并调整。返回新 pipeline（对 mmengine ConfigDict 就地改）。"""
+    h, w = size
+    for t in pipeline:
+        if t.get('type') in ('Resize', 'RandomResize'):
+            t['scale'] = (w, h)   # mmseg scale=(W, H)
+        if t.get('type') == 'RandomCrop':
+            t['crop_size'] = (w, h)
+    return pipeline
 
 
 def main():
@@ -51,6 +82,23 @@ def main():
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+
+    # -- 推理参数覆盖（cudnn benchmark / batch size / input size）--
+    if args.cudnn_benchmark is not None:
+        torch.backends.cudnn.benchmark = args.cudnn_benchmark
+        print(f'cudnn.benchmark set to {args.cudnn_benchmark}')
+    if args.batch_size is not None:
+        cfg.test_dataloader.batch_size = args.batch_size
+        print(f'test_dataloader.batch_size = {args.batch_size}')
+    if args.input_size is not None:
+        h, w = int(args.input_size[0]), int(args.input_size[1])
+        cfg.test_dataloader.dataset.pipeline = _apply_input_size(
+            cfg.test_dataloader.dataset.pipeline, (h, w))
+        # 同步 data_preprocessor 的 pad 尺寸，避免输入被 padding 到旧尺寸
+        pre = cfg.model.get('data_preprocessor')
+        if pre is not None:
+            pre['size'] = (h, w)
+        print(f'test input size = ({h}, {w})')
 
     init_default_scope(cfg.get('default_scope', 'mmseg'))
 
@@ -66,13 +114,15 @@ def main():
         json_file = osp.join(work_dir, f'fps_{timestamp}.json')
 
     repeat_times = args.repeat_times
-    # set cudnn_benchmark
-    torch.backends.cudnn.benchmark = False
+    # cudnn.benchmark：默认关闭（保守），--cudnn-benchmark 时开启
+    # （已在前面 args 处理时设置，这里不再硬编码覆盖）
     cfg.model.pretrained = None
 
     benchmark_dict = dict(config=args.config, unit='img / s')
     overall_fps_list = []
-    cfg.test_dataloader.batch_size = 1
+    # 单图延迟测试默认 batch_size=1；--batch-size 已在前面对 cfg 设置
+    if args.batch_size is None:
+        cfg.test_dataloader.batch_size = 1
     for time_index in range(repeat_times):
         print(f'Run {time_index + 1}:')
         # build the dataloader

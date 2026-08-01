@@ -48,3 +48,22 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   --cfg-options model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=false
 ```
+## 推理参数（benchmark.py 与 test.py 通用）
+```bash
+# 开启 cuDNN 自动调优（固定输入尺寸时通常更快，首次推理有 autotune 预热）
+--cudnn-benchmark
+# 吞吐测试：增大 batch，fps 提升但单图延迟不变
+--batch-size 4
+# 调整测试输入尺寸（同时覆盖 Resize pipeline 和 data_preprocessor size）
+--input-size 512 512
+# 组合示例：CUDA 核 + cudnn benchmark + batch 4
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth \
+  --cfg-options model.backbone.topp_flash_backend=cuda \
+  --cudnn-benchmark --batch-size 4
+```
+## 正确性说明（自定义核 vs 原始路径）
+- 自定义 CUDA 核的 `use_route_weight` 自动跟随配置的 `soft_routing`：
+  `soft_routing=False` 时核内不乘 route_weight，与原始路径 KVGather 行为一致。
+- 如需修改 `soft_routing` 等路由行为，请改配置文件后重训。

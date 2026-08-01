@@ -8,6 +8,7 @@ PROJECT_ROOT = osp.abspath(osp.join(osp.dirname(__file__), '..'))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+import torch
 from mmengine.config import Config, DictAction
 from mmengine.runner import Runner
 
@@ -54,6 +55,24 @@ def parse_args():
         help='job launcher')
     parser.add_argument(
         '--tta', action='store_true', help='Test time augmentation')
+    parser.add_argument(
+        '--cudnn-benchmark',
+        action='store_true',
+        default=None,
+        help='enable torch.backends.cudnn.benchmark for faster inference '
+        '(fixed input shape only). Default: keep config env setting.')
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=None,
+        help='override test_dataloader.batch_size.')
+    parser.add_argument(
+        '--input-size',
+        type=int,
+        nargs=2,
+        metavar=('H', 'W'),
+        default=None,
+        help='override test input resolution, e.g. --input-size 512 512.')
     # When using PyTorch version >= 2.0.0, the `torch.distributed.launch`
     # will pass the `--local-rank` parameter to `tools/train.py` instead
     # of `--local_rank`.
@@ -63,6 +82,17 @@ def parse_args():
         os.environ['LOCAL_RANK'] = str(args.local_rank)
 
     return args
+
+
+def apply_input_size(pipeline, size):
+    """覆盖 test pipeline 的 Resize scale（对 mmengine ConfigDict 就地改）。"""
+    h, w = size
+    for t in pipeline:
+        if t.get('type') in ('Resize', 'RandomResize'):
+            t['scale'] = (w, h)
+        if t.get('type') == 'RandomCrop':
+            t['crop_size'] = (w, h)
+    return pipeline
 
 
 def trigger_visualization_hook(cfg, args):
@@ -98,6 +128,22 @@ def main():
     cfg.launcher = args.launcher
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+
+    # -- 推理参数覆盖 --
+    if args.cudnn_benchmark is not None:
+        torch.backends.cudnn.benchmark = args.cudnn_benchmark
+        print(f'cudnn.benchmark set to {args.cudnn_benchmark}')
+    if args.batch_size is not None:
+        cfg.test_dataloader.batch_size = args.batch_size
+        print(f'test_dataloader.batch_size = {args.batch_size}')
+    if args.input_size is not None:
+        h, w = int(args.input_size[0]), int(args.input_size[1])
+        cfg.test_dataloader.dataset.pipeline = apply_input_size(
+            cfg.test_dataloader.dataset.pipeline, (h, w))
+        pre = cfg.model.get('data_preprocessor')
+        if pre is not None:
+            pre['size'] = (h, w)
+        print(f'test input size = ({h}, {w})')
 
     # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:

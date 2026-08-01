@@ -266,7 +266,8 @@ __global__ void topp_flash_head32_nwin7_kernel(
     float scale,
     int64_t height,
     int64_t width,
-    int64_t q_tiles)
+    int64_t q_tiles,
+    bool use_route_weight)
 {
   constexpr int CHANNEL_DIM = SPECIAL_HEAD_DIM * NUM_HEADS;
   constexpr int KV_CHANNEL_DIM = CHANNEL_DIM * 2;
@@ -305,7 +306,10 @@ __global__ void topp_flash_head32_nwin7_kernel(
   {
     const int64_t route_base = coarse * topk + route_col;
     s_idx[route_col] = r_idx[route_base];
-    s_weight[route_col] = to_float(r_weight[route_base]);
+    // soft_routing=False 时原始路径的 KVGather 不乘 r_weight，
+    // 这里用 1.0 保持一致性（同时避免无效分支，性能无损）。
+    s_weight[route_col] =
+        use_route_weight ? to_float(r_weight[route_base]) : 1.0f;
   }
   __syncthreads();
 
@@ -432,7 +436,8 @@ void launch_special_tile(torch::Tensor q_pix,
                          float scale,
                          int64_t height,
                          int64_t width,
-                         cudaStream_t stream)
+                         cudaStream_t stream,
+                         bool use_route_weight)
 {
   const int64_t n = q_pix.size(0);
   const int64_t q_len = q_pix.size(2);
@@ -450,7 +455,8 @@ void launch_special_tile(torch::Tensor q_pix,
           r_idx.data_ptr<int32_t>(),
           keep_len.data_ptr<int32_t>(),
           out.data_ptr<float>(),
-          n, q_len, kv_len, topk, scale, height, width, q_tiles);
+          n, q_len, kv_len, topk, scale, height, width, q_tiles,
+          use_route_weight);
 }
 
 template <typename scalar_t, int NUM_HEADS>
@@ -463,19 +469,20 @@ void launch_special(torch::Tensor q_pix,
                     float scale,
                     int64_t height,
                     int64_t width,
-                    cudaStream_t stream)
+                    cudaStream_t stream,
+                    bool use_route_weight)
 {
   if (q_pix.size(2) <= 4)
   {
     launch_special_tile<scalar_t, NUM_HEADS, 4>(
         q_pix, kv_pix, r_weight, r_idx, keep_len, out, scale, height, width,
-        stream);
+        stream, use_route_weight);
   }
   else
   {
     launch_special_tile<scalar_t, NUM_HEADS, WARPS_PER_BLOCK>(
         q_pix, kv_pix, r_weight, r_idx, keep_len, out, scale, height, width,
-        stream);
+        stream, use_route_weight);
   }
 }
 
@@ -490,27 +497,32 @@ void dispatch_special(torch::Tensor q_pix,
                       float scale,
                       int64_t height,
                       int64_t width,
-                      cudaStream_t stream)
+                      cudaStream_t stream,
+                      bool use_route_weight)
 {
   if (num_heads == 2)
   {
     launch_special<scalar_t, 2>(q_pix, kv_pix, r_weight, r_idx, keep_len,
-                                out, scale, height, width, stream);
+                                out, scale, height, width, stream,
+                                use_route_weight);
   }
   else if (num_heads == 4)
   {
     launch_special<scalar_t, 4>(q_pix, kv_pix, r_weight, r_idx, keep_len,
-                                out, scale, height, width, stream);
+                                out, scale, height, width, stream,
+                                use_route_weight);
   }
   else if (num_heads == 8)
   {
     launch_special<scalar_t, 8>(q_pix, kv_pix, r_weight, r_idx, keep_len,
-                                out, scale, height, width, stream);
+                                out, scale, height, width, stream,
+                                use_route_weight);
   }
   else
   {
     launch_special<scalar_t, 16>(q_pix, kv_pix, r_weight, r_idx, keep_len,
-                                 out, scale, height, width, stream);
+                                 out, scale, height, width, stream,
+                                 use_route_weight);
   }
 }
 
@@ -555,7 +567,8 @@ torch::Tensor topp_flash_forward_cuda(torch::Tensor q_pix,
                                       double scale,
                                       int64_t n_win,
                                       int64_t height,
-                                      int64_t width)
+                                      int64_t width,
+                                      bool use_route_weight)
 {
   const int64_t p2 = q_pix.size(1);
   const int64_t topk = r_idx.size(2);
@@ -574,19 +587,19 @@ torch::Tensor topp_flash_forward_cuda(torch::Tensor q_pix,
   {
     dispatch_special<__half>(q_pix, kv_pix, r_weight, r_idx, keep_len,
                              out, num_heads, static_cast<float>(scale),
-                             height, width, stream);
+                             height, width, stream, use_route_weight);
   }
   else if (q_pix.scalar_type() == torch::kBFloat16)
   {
     dispatch_special<__nv_bfloat16>(
         q_pix, kv_pix, r_weight, r_idx, keep_len, out, num_heads,
-        static_cast<float>(scale), height, width, stream);
+        static_cast<float>(scale), height, width, stream, use_route_weight);
   }
   else
   {
     dispatch_special<float>(q_pix, kv_pix, r_weight, r_idx, keep_len,
                             out, num_heads, static_cast<float>(scale),
-                            height, width, stream);
+                            height, width, stream, use_route_weight);
   }
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();

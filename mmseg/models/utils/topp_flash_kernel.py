@@ -164,7 +164,8 @@ def topp_flash_attention(q_pix: Tensor,
                          block_windows: int = 64,
                          backend: Optional[str] = None,
                          debug: bool = False,
-                         keep_len: Optional[Tensor] = None) -> Tensor:
+                         keep_len: Optional[Tensor] = None,
+                         use_route_weight: bool = True) -> Tensor:
     """Compute routed attention via CUDA kernel or torch_block backend."""
     backend = _normalize_backend(backend)
     # keep_len 由 CUDA 路由返回时已是 int32 连续张量，无需拷贝；
@@ -211,7 +212,7 @@ def topp_flash_attention(q_pix: Tensor,
                     return extension.forward(
                         _c(q_pix), _c(kv_pix), _c(r_weight), r_idx_c, keep_c,
                         num_heads, qk_dim, dim, float(scale),
-                        n_win, H, W)
+                        n_win, H, W, use_route_weight)
 
                 return _maybe_time_debug(debug, debug_key, debug_path, q_pix,
                                          run_cuda)
@@ -420,7 +421,7 @@ class _ToppCudaForwardFunction(torch.autograd.Function):
         extension = _load_cuda_extension()
         return extension.forward(q_pix, kv_pix, r_weight, r_idx, keep_len,
                                  num_heads, qk_dim, dim, float(scale),
-                                 n_win, H, W)
+                                 n_win, H, W, True)
 
     @staticmethod
     def backward(ctx, grad_out: Tensor) -> Tuple[Optional[Tensor], ...]:

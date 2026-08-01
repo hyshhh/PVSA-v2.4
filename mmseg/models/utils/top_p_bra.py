@@ -681,7 +681,8 @@ class ToppAttention(nn.Module):
                     H=H,
                     W=W,
                     backend=self.topp_flash_backend,
-                    debug=stage_profile))
+                    debug=stage_profile,
+                    use_route_weight=self.soft_routing))
             if stage_profile:
                 flash_kernel_ms = consume_topp_kernel_timing('Flash kernel')
                 if flash_kernel_ms is not None:

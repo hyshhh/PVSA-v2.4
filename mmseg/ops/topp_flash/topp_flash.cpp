@@ -14,7 +14,8 @@ torch::Tensor topp_flash_forward_cuda(torch::Tensor q_pix,
                                       double scale,
                                       int64_t n_win,
                                       int64_t height,
-                                      int64_t width);
+                                      int64_t width,
+                                      bool use_route_weight);
 
 std::vector<torch::Tensor> topp_route_forward_cuda(torch::Tensor query,
                                                    torch::Tensor key,
@@ -36,7 +37,8 @@ torch::Tensor topp_flash_forward(torch::Tensor q_pix,
                                  double scale,
                                  int64_t n_win,
                                  int64_t height,
-                                 int64_t width) {
+                                 int64_t width,
+                                 bool use_route_weight) {
   TORCH_CHECK(q_pix.is_cuda(), "q_pix must be a CUDA tensor");
   TORCH_CHECK(kv_pix.is_cuda(), "kv_pix must be a CUDA tensor");
   TORCH_CHECK(r_weight.is_cuda(), "r_weight must be a CUDA tensor");
@@ -45,7 +47,7 @@ torch::Tensor topp_flash_forward(torch::Tensor q_pix,
   return topp_flash_forward_cuda(
       q_pix.contiguous(), kv_pix.contiguous(), r_weight.contiguous(),
       r_idx.contiguous(), keep_len.contiguous(), num_heads, qk_dim, dim,
-      scale, n_win, height, width);
+      scale, n_win, height, width, use_route_weight);
 }
 
 std::vector<torch::Tensor> topp_route_forward(torch::Tensor query,
