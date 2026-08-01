@@ -705,7 +705,9 @@ class ToppAttention(nn.Module):
             'router',
             lambda: self.router(q_win, k_win, GA))  # (n, p^2, topk) tensors
 
-        kv_pix_sel = self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix)  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
+        kv_pix_sel = run_stage(
+            'kv_gather',
+            lambda: self.kv_gather(r_idx=r_idx, r_weight=r_weight, kv=kv_pix))  # (n, p^2, topk, h_kv*w_kv, c_qk+c_v)
         k_pix_sel, v_pix_sel = kv_pix_sel.split([self.qk_dim, self.dim], dim=-1)
 
         ######### do attention as normal ####################
@@ -713,11 +715,15 @@ class ToppAttention(nn.Module):
                               m=self.num_heads)
         v_pix_sel = rearrange(v_pix_sel, 'n p2 k w2 (m c) -> (n p2) m (k w2) c',
                               m=self.num_heads)
+        # 保留原始 4D q_pix 供 debug 打印（与 CUDA 路径形态一致）
+        q_pix_4d = q_pix
         q_pix = rearrange(q_pix, 'n p2 w2 (m c) -> (n p2) m w2 c',
                           m=self.num_heads)
 
         # param-free multihead attention
-        attn_weight = (q_pix * self.scale) @ k_pix_sel
+        attn_weight = run_stage(
+            'attn',
+            lambda: (q_pix * self.scale) @ k_pix_sel)
         if self.use_route_mask:
             route_mask = r_mask[..., None].expand(-1, -1, -1, kv_pix_sel.size(-2))
             route_mask = rearrange(route_mask, 'n p2 k w2 -> (n p2) 1 1 (k w2)')
@@ -731,12 +737,20 @@ class ToppAttention(nn.Module):
 
         out = out + lepe
         # output linear
-        out = self.wo(out)
+        out = run_stage('wo', lambda: self.wo(out))
 
         # NOTE: use padding for semantic segmentation
         # crop padded region
         if self.auto_pad and (pad_r > 0 or pad_b > 0):
             out = out[:, :H_in, :W_in, :].contiguous()
+
+        # torch 路径也支持 debug 打印各阶段耗时，便于与 CUDA 核对比
+        if stage_debug:
+            log_path = f'torch_block_{self.topp_flash_backend or "torch"}'
+            _log_topp_stage_debug(
+                log_path, x, q_pix_4d, kv_pix, r_idx,
+                stage_times, self.num_heads, self.qk_dim, self.dim,
+                self.n_win)
 
         if ret_attn_mask:
             return out, r_weight, r_idx, attn_weight
