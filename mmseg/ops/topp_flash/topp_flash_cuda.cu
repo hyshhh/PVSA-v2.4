@@ -409,7 +409,11 @@ void launch_route_batch_nwin7(torch::Tensor query,
                               cudaStream_t stream)
 {
   const int route_blocks = static_cast<int>(n * SPECIAL_P2);
-  constexpr int ROUTE_BLOCK_THREADS = QK_DIM == 64 ? 64 : ROUTE_THREADS;
+  // 所有 QK_DIM 统一用 128 线程：S1(QK_DIM=64) 原来只用 64 线程=2 warps，
+  // 每 block 并行度不足导致内存延迟无法隐藏，Router 核慢 7 倍。
+  // 128 线程时 dot 阶段多余线程空闲，但 topk 并行扫描 + block 归约吃满，
+  // 提高 SM 占用率。共享内存按模板参数自动匹配。
+  constexpr int ROUTE_BLOCK_THREADS = ROUTE_THREADS;
   topp_route_nwin7_kernel_fixed<QK_DIM, ROUTE_BLOCK_THREADS>
       <<<route_blocks, ROUTE_BLOCK_THREADS, 0, stream>>>(
           query.data_ptr<float>(), key.data_ptr<float>(),
