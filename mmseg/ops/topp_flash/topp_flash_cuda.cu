@@ -124,29 +124,70 @@ __global__ void topp_route_nwin7_kernel_fixed(
   }
   __syncthreads();
 
-  if (tid == 0)
-  {
-    float selected_scores[SPECIAL_MAX_TOPK];
-    int selected_idx[SPECIAL_MAX_TOPK];
+  // ── 并行 topk 选择 ─────────────────────────────────────────────
+  // 用整个 BLOCK_THREADS 并行扫描 49 列找当前最大值，替代原 tid==0
+  // 单线程串行 topk×49 次比较。每轮选出 1 个 topk，O(topk * (49/threads
+  // + log))，对 BLOCK_THREADS=64 与 SPECIAL_P2=49 几乎纯并行。
+  float selected_scores[SPECIAL_MAX_TOPK];
+  int selected_idx[SPECIAL_MAX_TOPK];
+  __shared__ float s_scores_copy[SPECIAL_P2];
+  __shared__ float s_max_val[BLOCK_THREADS];
+  __shared__ int s_max_idx[BLOCK_THREADS];
 
-    for (int tk = 0; tk < topk; tk++)
+  for (int col = tid; col < SPECIAL_P2; col += BLOCK_THREADS)
+  {
+    s_scores_copy[col] = s_scores[col];
+  }
+  __syncthreads();
+
+  for (int tk = 0; tk < topk; tk++)
+  {
+    // 每线程负责 [tid, tid+BLOCK_THREADS, ...] 范围内的列
+    float local_best = -INFINITY;
+    int local_best_idx = 0;
+    for (int col = tid; col < SPECIAL_P2; col += BLOCK_THREADS)
     {
-      float best = -INFINITY;
-      int best_idx = 0;
-#pragma unroll
-      for (int col = 0; col < SPECIAL_P2; col++)
+      const float score = s_scores_copy[col];
+      if (score > local_best ||
+          (score == local_best && col < local_best_idx))
       {
-        const float score = s_scores[col];
-        if (score > best || (score == best && col < best_idx))
+        local_best = score;
+        local_best_idx = col;
+      }
+    }
+    s_max_val[tid] = local_best;
+    s_max_idx[tid] = local_best_idx;
+    __syncthreads();
+
+    // block 归约找全局最大（等号取小索引保证确定性）
+    for (int stride = BLOCK_THREADS / 2; stride > 0; stride >>= 1)
+    {
+      if (tid < stride)
+      {
+        const float a = s_max_val[tid];
+        const float b = s_max_val[tid + stride];
+        if (b > a || (b == a && s_max_idx[tid + stride] < s_max_idx[tid]))
         {
-          best = score;
-          best_idx = col;
+          s_max_val[tid] = b;
+          s_max_idx[tid] = s_max_idx[tid + stride];
         }
       }
+      __syncthreads();
+    }
+
+    if (tid == 0)
+    {
+      const float best = s_max_val[0];
+      const int best_idx = s_max_idx[0];
       selected_scores[tk] = best;
       selected_idx[tk] = best_idx;
-      s_scores[best_idx] = -INFINITY;
+      s_scores_copy[best_idx] = -INFINITY;
     }
+    __syncthreads();
+  }
+
+  if (tid == 0)
+  {
 
     float max_score = -INFINITY;
     for (int tk = 0; tk < topk; tk++)

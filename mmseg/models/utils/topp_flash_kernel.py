@@ -167,10 +167,16 @@ def topp_flash_attention(q_pix: Tensor,
                          keep_len: Optional[Tensor] = None) -> Tensor:
     """Compute routed attention via CUDA kernel or torch_block backend."""
     backend = _normalize_backend(backend)
+    # keep_len 由 CUDA 路由返回时已是 int32 连续张量，无需拷贝；
+    # 仅 torch_block 路径需要 long/mask。此处按需转换，避免 CUDA 推理
+    # 多一次 int32->int64->int32 的往返拷贝。
+    cuda_backend = backend in _CUDA_BACKENDS
     if keep_len is None:
         if r_mask is None:
             raise ValueError('either r_mask or keep_len must be provided.')
         keep_len = r_mask.sum(dim=-1).contiguous().long()
+    elif cuda_backend:
+        keep_len = keep_len.contiguous()
     else:
         keep_len = keep_len.contiguous().long()
     debug_key = None
@@ -194,10 +200,16 @@ def topp_flash_attention(q_pix: Tensor,
             try:
                 def run_cuda():
                     extension = _load_cuda_extension()
+                    # CUDA 路由/前向产生的张量已连续且 dtype 正确，
+                    # 用 is_contiguous() 短路，跳过无谓的 .contiguous()/.int()。
+                    def _c(t):
+                        return t if t.is_contiguous() else t.contiguous()
+                    r_idx_c = _c(r_idx)
+                    r_idx_c = r_idx_c if r_idx_c.dtype == torch.int32 else r_idx_c.int()
+                    keep_c = _c(keep_len)
+                    keep_c = keep_c if keep_c.dtype == torch.int32 else keep_c.int()
                     return extension.forward(
-                        q_pix.contiguous(), kv_pix.contiguous(),
-                        r_weight.contiguous(), r_idx.contiguous().int(),
-                        keep_len.contiguous().int(),
+                        _c(q_pix), _c(kv_pix), _c(r_weight), r_idx_c, keep_c,
                         num_heads, qk_dim, dim, float(scale),
                         n_win, H, W)
 
@@ -535,11 +547,21 @@ def _unflatten_windows(flat_out: Tensor, n: int, n_win: int, H: int, W: int,
         0, 1, 3, 2, 4, 5).reshape(n, H, W, dim).contiguous()
 
 
+_CAN_BUILD_CACHE = None
+
+
 def _can_build_cuda_extension() -> bool:
+    # 结果在运行期不变（编译环境、源码是否存在），缓存避免每 block
+    # 两次 Path.exists() 系统调用。首个调用若返回 False 则永久缓存 False。
+    global _CAN_BUILD_CACHE
+    if _CAN_BUILD_CACHE is not None:
+        return _CAN_BUILD_CACHE
     if not torch.cuda.is_available() or CUDA_HOME is None:
+        _CAN_BUILD_CACHE = False
         return False
     cpp_path, cu_path = _cuda_source_paths()
-    return cpp_path.exists() and cu_path.exists()
+    _CAN_BUILD_CACHE = cpp_path.exists() and cu_path.exists()
+    return _CAN_BUILD_CACHE
 
 
 def _can_run_cuda_forward(q_pix: Tensor, kv_pix: Tensor, r_weight: Tensor,
