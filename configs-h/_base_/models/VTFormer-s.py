@@ -64,12 +64,6 @@ model = dict(
         # 'none' | 'gate' | 'concat' | 'gate_concat' | 'cross_gate' | 'cross_concat'
         # 'mask'（v2.4 旧版固定 mask 调制）
         cross_stage_fusion_mode='cross_concat',
-        # 特征图保存开关
-        feature_vis_config=dict(
-            enabled=False,              # True 开启保存
-            save_dir='cam/features_imgs4',  # 保存目录
-            out_size=512,               # 上采样目标尺寸
-            channel_reduce='mean'),     # 通道聚合方式：'mean' | 'max'
         # 注意力图保存开关
         attn_vis_config=dict(
             enabled=False,              # True 开启保存
