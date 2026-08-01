@@ -92,7 +92,9 @@ class Block(nn.Module):
                  debug_route=False,
                  topp_flash_debug=False,
                  use_route_mask=False,
-                 use_nan_guard=False):
+                 use_nan_guard=False,
+                 use_plain_attn=False,
+                 attention_type='topp'):
         super().__init__()
         qk_dim = qk_dim or dim
 
@@ -103,7 +105,11 @@ class Block(nn.Module):
             self.pos_embed = nn.Conv2d(dim, dim, kernel_size=before_attn_dwconv, padding=1, groups=dim)
         else:
             self.pos_embed = lambda x: 0
-        if topk > 0:
+        # topk<=0（如 BRA 默认最后一阶段 -1）或显式 plain：走普通 self-attention
+        if use_plain_attn or topk <= 0:
+            self.PA = Attention(dim=dim, num_heads=num_heads)
+            self._use_plain_attn = True
+        elif attention_type == 'topp':
             self.PA = ToppAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
                                     qk_scale=qk_scale, kv_per_win=kv_per_win,
                                     kv_downsample_ratio=kv_downsample_ratio,
@@ -124,17 +130,23 @@ class Block(nn.Module):
                                     topp_flash_debug=topp_flash_debug,
                                     use_route_mask=use_route_mask,
                                     use_nan_guard=use_nan_guard)
-        elif topk == -1:
-            self.attn = Attention(dim=dim)
-        elif topk == -2:
-            self.attn = AttentionLePE(dim=dim, side_dwconv=side_dwconv)
-        elif topk == 0:
-            self.attn = nn.Sequential(Rearrange('n h w c -> n c h w'),  # compatiability
-                                      nn.Conv2d(dim, dim, 1),  # pseudo qkv linear
-                                      nn.Conv2d(dim, dim, 5, padding=2, groups=dim),  # pseudo attention
-                                      nn.Conv2d(dim, dim, 1),  # pseudo out linear
-                                      Rearrange('n c h w -> n h w c')
-                                      )
+            self._use_plain_attn = False
+        elif attention_type == 'bra':
+            # BRA: 标准 Bi-Level Routing Attention（固定 top-k，无 Top-P 裁剪）
+            self.PA = BiLevelRoutingAttention(dim=dim, num_heads=num_heads, n_win=n_win, qk_dim=qk_dim,
+                                              qk_scale=qk_scale, kv_per_win=kv_per_win,
+                                              kv_downsample_ratio=kv_downsample_ratio,
+                                              kv_downsample_kernel=kv_downsample_kernel,
+                                              kv_downsample_mode=kv_downsample_mode,
+                                              topk=topk, param_attention=param_attention,
+                                              param_routing=param_routing,
+                                              diff_routing=diff_routing,
+                                              soft_routing=soft_routing,
+                                              side_dwconv=side_dwconv,
+                                              auto_pad=auto_pad)
+            self._use_plain_attn = False
+        else:
+            raise ValueError(f'Unsupported attention_type: {attention_type}')
         self.norm1 = nn.LayerNorm(dim, eps=1e-6)  # important to avoid attention collapsing
         self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         self.norm3 = nn.LayerNorm(dim, eps=1e-6)
@@ -167,42 +179,33 @@ class Block(nn.Module):
         """
         # VTFormerv1.22,只有Top-p
         x = x + self.pos_embed(x)
-        x = x.permute(0, 2, 3, 1) 
-        PA=self.PA(self.norm3(x),None)
+        x = x.permute(0, 2, 3, 1)
+        if self._use_plain_attn:
+            PA = self.PA(self.norm3(x))
+        else:
+            PA = self.PA(self.norm3(x), None)
         if self.pre_norm:
-                x = x + self.drop_path(PA)   # (N, H, W, C)          
+                x = x + self.drop_path(PA)   # (N, H, W, C)
                 x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
         x = x.permute(0, 3, 1, 2)
         return x
-        # x = x.permute(0, 3, 1, 2)
 
-        
-        # VTFormerv3.1
-        x = x + self.pos_embed(x)
-        x = x.permute(0, 2, 3, 1) 
-        GA,A1=self.attn(self.norm1(x))
 
-        if self.pre_norm:
-                x = x + self.drop_path(GA)  # (N, H, W, C)
-                x = x + self.drop_path(self.mlp(self.norm2(x)))  # (N, H, W, C)
-        # x = x.permute(0, 3, 1, 2)
-
-        # #VTFormerv3.1
-        # x = x + self.pos_embed(x)
-        # x = x.permute(0, 2, 3, 1)
-        PA=self.PA(self.norm3(x),A1)
-        if self.pre_norm:
-                x = x + self.drop_path(PA)  # (N, H, W, C)          
-                x = x + self.drop_path(self.mlp2(self.norm4(x)))  # (N, H, W, C)
-        x = x.permute(0, 3, 1, 2)
-        return x
 class FeatureAlignmentModule(nn.Module):
-    def __init__(self, dim, reduction=1, lambda_c=.5, lambda_s=.5):
+    def __init__(self, dim, reduction=1, lambda_c=.5, lambda_s=.5,
+                 use_channel=True, use_spatial=True):
         super(FeatureAlignmentModule, self).__init__()
-        self.lambda_c = lambda_c
-        self.lambda_s = lambda_s
-        self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
-        self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
+        if not use_channel and not use_spatial:
+            raise ValueError('FeatureAlignmentModule 至少需要开启 CA 或 SA 之一')
+        self.use_channel = use_channel
+        self.use_spatial = use_spatial
+        # sigmoid(0) = 0.5, so 2*sigmoid(0) = 1.0 — neutral init
+        if use_channel:
+            self.lambda_c = nn.Parameter(torch.tensor(0.0))
+            self.channel_weights = ChannelWeights(dim=dim, reduction=reduction)
+        if use_spatial:
+            self.lambda_s = nn.Parameter(torch.tensor(0.0))
+            self.spatial_weights = SpatialWeights(dim=dim, reduction=reduction)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -220,12 +223,19 @@ class FeatureAlignmentModule(nn.Module):
                 m.bias.data.zero_()
     
     def forward(self, x1, x2):
-        channel_weights = self.channel_weights(x1, x2)
-        spatial_weights = self.spatial_weights(x1, x2)
-        out_x1 = x1 + 0.5 * channel_weights[1] * x2 + 0.5 * spatial_weights[1] * x2
-        out_x2 = x2 + 0.5* channel_weights[0] * x1 + 0.5 * spatial_weights[0] * x1
+        out_x1, out_x2 = x1, x2
+        if self.use_channel:
+            channel_weights = self.channel_weights(x1, x2)
+            lc = 2.0 * self.lambda_c.sigmoid()
+            out_x1 = out_x1 + lc * channel_weights[1] * x2
+            out_x2 = out_x2 + lc * channel_weights[0] * x1
+        if self.use_spatial:
+            spatial_weights = self.spatial_weights(x1, x2)
+            ls = 2.0 * self.lambda_s.sigmoid()
+            out_x1 = out_x1 + ls * spatial_weights[1] * x2
+            out_x2 = out_x2 + ls * spatial_weights[0] * x1
         return out_x1, out_x2
-from mmengine.model import BaseModule, ModuleList, Sequential   
+from mmengine.model import BaseModule, ModuleList, Sequential
 from mmcv.cnn.bricks import DropPath, build_activation_layer, build_norm_layer
 import torch
 import torch.nn as nn
@@ -239,9 +249,11 @@ class DepthWiseConvModule(nn.Module):
                  stride=1,
                  padding=1,
                  drop_rate=0.,
-                 dilation=1):
+                 dilation=1,
+                 activate_after_dw=False):
         super(DepthWiseConvModule, self).__init__()
-        
+        self.activate_after_dw = activate_after_dw
+
         # 1. 自动计算 Padding，保证 stride=1 时尺寸不变
         # 考虑到 dilation 的情况: padding = dilation * (kernel_size - 1) // 2
         padding = dilation * (kernel_size - 1) // 2
@@ -282,7 +294,8 @@ class DepthWiseConvModule(nn.Module):
         out = self.activate(out) # 升维后激活
         out = self.pe_conv(out)
         out = self.bn2(out)
-        # 深度卷积后不激活（标准 MobileNetV2 线性瓶颈层）
+        if self.activate_after_dw:
+            out = self.activate(out)
         out = self.fc2(out)
         out = self.bn3(out)
         # 最后通常不激活，直接做 Dropout 和 Add
@@ -304,10 +317,12 @@ class DepthWiseConvModule(nn.Module):
 class MBConv(nn.Module):
     """EfficientNet MBConv 块：升维→DWConv→SE→降维，SiLU 激活"""
     def __init__(self, embed_dims, feedforward_channels, output_channels,
-                 kernel_size=3, stride=1, se_ratio=0.25, drop_rate=0.):
+                 kernel_size=3, stride=1, se_ratio=0.25, drop_rate=0.,
+                 use_se=True):
         super().__init__()
         padding = kernel_size // 2
         self.use_residual = (stride == 1 and embed_dims == output_channels)
+        self.use_se = use_se
         # 升维
         self.expand = nn.Sequential(
             nn.Conv2d(embed_dims, feedforward_channels, 1, bias=False),
@@ -321,13 +336,14 @@ class MBConv(nn.Module):
             nn.BatchNorm2d(feedforward_channels),
             nn.SiLU())
         # SE 注意力
-        se_channels = max(1, int(embed_dims * se_ratio))
-        self.se = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(feedforward_channels, se_channels, 1),
-            nn.SiLU(),
-            nn.Conv2d(se_channels, feedforward_channels, 1),
-            nn.Sigmoid())
+        if self.use_se:
+            se_channels = max(1, int(embed_dims * se_ratio))
+            self.se = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Conv2d(feedforward_channels, se_channels, 1),
+                nn.SiLU(),
+                nn.Conv2d(se_channels, feedforward_channels, 1),
+                nn.Sigmoid())
         # 降维
         self.proj = nn.Sequential(
             nn.Conv2d(feedforward_channels, output_channels, 1, bias=False),
@@ -338,7 +354,8 @@ class MBConv(nn.Module):
         residual = x
         x = self.expand(x)
         x = self.dw_conv(x)
-        x = x * self.se(x)
+        if self.use_se:
+            x = x * self.se(x)
         x = self.proj(x)
         x = self.drop(x)
         if self.use_residual:
@@ -351,6 +368,133 @@ class MBConv(nn.Module):
         self.expand[0], self.expand[1] = _fuse_conv_bn(self.expand[0], self.expand[1])
         self.dw_conv[0], self.dw_conv[1] = _fuse_conv_bn(self.dw_conv[0], self.dw_conv[1])
         self.proj[0], self.proj[1] = _fuse_conv_bn(self.proj[0], self.proj[1])
+
+
+class ConvBNAct(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1,
+                 groups=1, act=True):
+        super().__init__()
+        padding = kernel_size // 2
+        self.conv = nn.Conv2d(
+            in_channels, out_channels, kernel_size, stride, padding,
+            groups=groups, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.SiLU() if act else nn.Identity()
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+    def fuse_for_inference(self):
+        if self.training:
+            return
+        self.conv, self.bn = _fuse_conv_bn(self.conv, self.bn)
+
+
+class C2fBottleneck(nn.Module):
+    def __init__(self, channels, shortcut=True):
+        super().__init__()
+        self.cv1 = ConvBNAct(channels, channels, kernel_size=3)
+        self.cv2 = ConvBNAct(channels, channels, kernel_size=3)
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        out = self.cv2(self.cv1(x))
+        return x + out if self.shortcut else out
+
+    def fuse_for_inference(self):
+        self.cv1.fuse_for_inference()
+        self.cv2.fuse_for_inference()
+
+
+class C2fBlock(nn.Module):
+    """YOLO 风格 C2f 块，用于验证跨阶段部分连接的 CNN 分支收益。"""
+    def __init__(self, channels, hidden_ratio=0.5, num_blocks=2):
+        super().__init__()
+        hidden_channels = max(1, int(channels * hidden_ratio))
+        self.cv1 = ConvBNAct(channels, 2 * hidden_channels, kernel_size=1)
+        self.blocks = nn.ModuleList([
+            C2fBottleneck(hidden_channels) for _ in range(num_blocks)
+        ])
+        self.cv2 = ConvBNAct(
+            (2 + num_blocks) * hidden_channels, channels, kernel_size=1)
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, dim=1))
+        y.extend(block(y[-1]) for block in self.blocks)
+        return self.cv2(torch.cat(y, dim=1))
+
+    def fuse_for_inference(self):
+        self.cv1.fuse_for_inference()
+        for block in self.blocks:
+            block.fuse_for_inference()
+        self.cv2.fuse_for_inference()
+
+
+class C3k2Bottleneck(nn.Module):
+    def __init__(self, channels, shortcut=True):
+        super().__init__()
+        self.cv1 = ConvBNAct(channels, channels, kernel_size=3)
+        self.cv2 = ConvBNAct(channels, channels, kernel_size=3)
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        out = self.cv2(self.cv1(x))
+        return x + out if self.shortcut else out
+
+    def fuse_for_inference(self):
+        self.cv1.fuse_for_inference()
+        self.cv2.fuse_for_inference()
+
+
+class C3k2Block(nn.Module):
+    """C3k2 风格块，用于对比更强卷积分支的局部建模能力。"""
+    def __init__(self, channels, hidden_ratio=0.5, num_blocks=2):
+        super().__init__()
+        hidden_channels = max(1, int(channels * hidden_ratio))
+        self.cv1 = ConvBNAct(channels, hidden_channels, kernel_size=1)
+        self.cv2 = ConvBNAct(channels, hidden_channels, kernel_size=1)
+        self.blocks = nn.Sequential(*[
+            C3k2Bottleneck(hidden_channels) for _ in range(num_blocks)
+        ])
+        self.cv3 = ConvBNAct(2 * hidden_channels, channels, kernel_size=1)
+
+    def forward(self, x):
+        return self.cv3(torch.cat((self.blocks(self.cv1(x)), self.cv2(x)), dim=1))
+
+    def fuse_for_inference(self):
+        self.cv1.fuse_for_inference()
+        self.cv2.fuse_for_inference()
+        for block in self.blocks:
+            block.fuse_for_inference()
+        self.cv3.fuse_for_inference()
+
+
+class ConvNeXtBlock(nn.Module):
+    """ConvNeXt 块，用于验证大核深度卷积和通道 MLP 的收益。"""
+    def __init__(self, channels, layer_scale=1e-6, drop_rate=0.):
+        super().__init__()
+        self.dwconv = nn.Conv2d(
+            channels, channels, kernel_size=7, padding=3,
+            groups=channels)
+        self.norm = nn.LayerNorm(channels, eps=1e-6)
+        self.pwconv1 = nn.Linear(channels, 4 * channels)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Linear(4 * channels, channels)
+        self.gamma = nn.Parameter(layer_scale * torch.ones(channels))
+        self.drop = nn.Dropout(drop_rate)
+
+    def forward(self, x):
+        residual = x
+        out = self.dwconv(x)
+        out = out.permute(0, 2, 3, 1)
+        out = self.norm(out)
+        out = self.pwconv1(out)
+        out = self.act(out)
+        out = self.pwconv2(out)
+        out = self.gamma.view(1, 1, 1, -1) * out
+        out = out.permute(0, 3, 1, 2)
+        return residual + self.drop(out)
+
 
 class ChannelWeights(nn.Module):
     def __init__(self, dim, reduction=1):
@@ -481,6 +625,12 @@ class VTFormer(nn.Module):
                  cnn_block_layers=[2, 1, 2, 1],
                  cnn_block_type='dwconv',
                  feature_vis_config=None,
+                 use_fam=True,
+                 fam_use_channel=True,
+                 fam_use_spatial=True,
+                 use_plain_attn_last_stage=False,
+                 attention_type='topp',
+                 route_pooling='avg',
                  **kwargs):
 
         super().__init__()
@@ -502,17 +652,57 @@ class VTFormer(nn.Module):
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.norm_eval = norm_eval
+        self.use_fam = use_fam
+        self.fam_use_channel = fam_use_channel
+        self.fam_use_spatial = fam_use_spatial
+        # CA/SA 全关时等价于关闭 FAM，避免空模块仍被统计
+        if use_fam and (not fam_use_channel) and (not fam_use_spatial):
+            self.use_fam = False
+        self.attention_type = attention_type
+        self.use_plain_attn_last_stage = use_plain_attn_last_stage
+        self.route_pooling = route_pooling
+        # BRA 模式固定使用标准 BiFormer topks，避免沿用 PVSA 配置里的 [16,12,8,6]。
+        # PVSA(topp) 才使用配置传入的 topks；未传时回退 [8,8,-1,-1]。
+        if attention_type == 'bra':
+            topks = [1, 4, 16, -1]
+        elif topks is None:
+            topks = [8, 8, -1, -1]
+        self.topks = list(topks)
+        # cnn_block_layers 全零时禁用 CNN 分支，只走 Transformer
+        self._cnn_disabled = all(v == 0 for v in cnn_block_layers)
         ############ downsample layers (patch embeddings) ######################
         # CNN block 工厂函数
+        valid_cnn_block_types = {
+            'dwconv', 'dwconv_act', 'mbconv', 'mbconv_no_se',
+            'c2f', 'c3k2', 'convnext'
+        }
+        if cnn_block_type not in valid_cnn_block_types:
+            raise ValueError(
+                f'cnn_block_type must be one of {valid_cnn_block_types}, '
+                f'but got {cnn_block_type}')
+        self.cnn_block_type = cnn_block_type
         expansion = 4
         def _make_cnn_block(ch):
             if cnn_block_type == 'mbconv':
                 return MBConv(ch, expansion * ch, ch)
-            return DepthWiseConvModule(ch, expansion * ch, ch)
+            if cnn_block_type == 'mbconv_no_se':
+                return MBConv(ch, expansion * ch, ch, use_se=False)
+            if cnn_block_type == 'c2f':
+                return C2fBlock(ch)
+            if cnn_block_type == 'c3k2':
+                return C3k2Block(ch)
+            if cnn_block_type == 'convnext':
+                return ConvNeXtBlock(ch)
+            return DepthWiseConvModule(
+                ch, expansion * ch, ch,
+                activate_after_dw=(cnn_block_type == 'dwconv_act'))
 
         self.downsample_layers = nn.ModuleList()
         self.downsample_layers2 = nn.ModuleList()
         self.FAM = nn.ModuleList()
+        # cnn_block_layers 全 0 时，整条 CNN 分支 + 同层 fusion 都不创建
+        if self._cnn_disabled:
+            self.use_fam = False
 
 
 
@@ -544,16 +734,27 @@ class VTFormer(nn.Module):
             stem = checkpoint_wrapper(stem)
             stem2 = checkpoint_wrapper(stem2)
         self.downsample_layers.append(stem)
-        self.downsample_layers2.append(stem2)
-
-        self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[0], reduction=fam_reduction))
         self.fusion = nn.ModuleList()
+        fusion_builder = getattr(
+            self, '_build_fusion_layer',
+            lambda channels: nn.Conv2d(
+                2 * channels, channels, kernel_size=1, stride=1, padding=0, bias=True))
+        # cnn_block_layers 全 0 时，整条 CNN 分支 + 同层 fusion 都不创建
+        if not self._cnn_disabled:
+            self.downsample_layers2.append(stem2)
+            if self.use_fam:
+                self.FAM.append(FeatureAlignmentModule(
+                    dim=2 * embed_dim[0], reduction=fam_reduction,
+                    use_channel=fam_use_channel, use_spatial=fam_use_spatial))
+            self.fusion.append(fusion_builder(embed_dim[0]))
+        else:
+            # 纯 Transformer 模式占位，保持索引对齐
+            self.downsample_layers2.append(nn.Identity())
+            self.fusion.append(nn.Identity())
+
         self.norm = nn.LayerNorm(normalized_shape=1)  # 根据实际维度调整
         # 定义Sigmoid激活
         self.sigmoid = nn.Sigmoid()
-        self.fusion.append(
-            nn.Conv2d(2*embed_dim[0], embed_dim[0], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
-            )
         for i in range(3):
             downsample_layer = nn.Sequential(
                 nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
@@ -568,29 +769,23 @@ class VTFormer(nn.Module):
             for _ in range(cnn_block_layers[i + 1])
              ])
             downsample_layer2 = nn.Sequential(*layers)
-            #VTFormer1.4 1   v1.5-3
-            # downsample_layer2 = nn.Sequential(
-            #     nn.Conv2d(embed_dim[i], embed_dim[i + 1], kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
-            #     nn.BatchNorm2d(embed_dim[i + 1]),
-            #     DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            #     DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            #     # DepthWiseConvModule(embed_dim[i + 1], 4*embed_dim[i + 1], embed_dim[i + 1],3, 1, 1),
-            # )
             if (pe is not None) and i + 1 in pe_stages:
                 downsample_layer.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
                 downsample_layer2.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
-                # pool1.append(get_pe_layer(emb_dim=embed_dim[i + 1], name=pe))
             if use_checkpoint_stages:
                 downsample_layer = checkpoint_wrapper(downsample_layer)
                 downsample_layer2 = checkpoint_wrapper(downsample_layer2)
-                # pool1= checkpoint_wrapper(pool1)
             self.downsample_layers.append(downsample_layer)
-            self.downsample_layers2.append(downsample_layer2)
-            # self.pool_layers.append(pool1)
-            self.fusion.append(
-            nn.Conv2d(2*embed_dim[i + 1], embed_dim[i + 1], kernel_size=(1,1), stride=(1, 1), padding=(0, 0),bias=True)
-            )
-            self.FAM.append(FeatureAlignmentModule(dim=2*embed_dim[i + 1], reduction=fam_reduction))
+            if not self._cnn_disabled:
+                self.downsample_layers2.append(downsample_layer2)
+                self.fusion.append(fusion_builder(embed_dim[i + 1]))
+                if self.use_fam:
+                    self.FAM.append(FeatureAlignmentModule(
+                        dim=2 * embed_dim[i + 1], reduction=fam_reduction,
+                        use_channel=fam_use_channel, use_spatial=fam_use_spatial))
+            else:
+                self.downsample_layers2.append(nn.Identity())
+                self.fusion.append(nn.Identity())
 
         ##########################################################################
 
@@ -598,12 +793,11 @@ class VTFormer(nn.Module):
         nheads = [dim // head_dim for dim in qk_dims]
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depth))]
         cur = 0
-        topks=[16,12,8,6]
         for i in range(4):
             stage = nn.Sequential(
                 *[Block(dim=embed_dim[i], drop_path=dp_rates[cur + j],
                         layer_scale_init_value=layer_scale_init_value,
-                        topk=topks[i],
+                        topk=self.topks[i],
                         num_heads=nheads[i],
                         n_win=n_win,
                         qk_dim=qk_dims[i],
@@ -633,7 +827,11 @@ class VTFormer(nn.Module):
                         debug_route=self.debug_route,
                         topp_flash_debug=self.topp_flash_debug,
                         use_route_mask=self.use_route_mask,
-                        use_nan_guard=self.use_nan_guard) for j in range(depth[i])],
+                        use_nan_guard=self.use_nan_guard,
+                        use_plain_attn=(
+                            (self.use_plain_attn_last_stage and i == 3) or self.topks[i] <= 0),
+                        attention_type=self.attention_type
+                        ) for j in range(depth[i])],
             )
             if i in use_checkpoint_stages:
                 stage = checkpoint_wrapper(stage)
@@ -685,7 +883,9 @@ class VTFormer(nn.Module):
         for layer in self.downsample_layers2:
             _fuse_sequential_conv_bn(layer)
         for module in self.modules():
-            if isinstance(module, (DepthWiseConvModule, MBConv)):
+            if isinstance(module, (DepthWiseConvModule, MBConv, ConvBNAct,
+                                   C2fBottleneck, C2fBlock, C3k2Bottleneck,
+                                   C3k2Block, ConvNeXtBlock)):
                 module.fuse_for_inference()
         self._inference_fused = True
 
