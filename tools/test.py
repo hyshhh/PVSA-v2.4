@@ -73,6 +73,12 @@ def parse_args():
         metavar=('H', 'W'),
         default=None,
         help='override test input resolution, e.g. --input-size 512 512.')
+    parser.add_argument(
+        '--cuda-graph',
+        action='store_true',
+        help='capture the model forward as a CUDA Graph on first test image '
+        'and replay it afterwards (requires topp_flash_backend=cuda and '
+        'fixed input shape). predict post-processing runs outside the graph.')
     # When using PyTorch version >= 2.0.0, the `torch.distributed.launch`
     # will pass the `--local-rank` parameter to `tools/train.py` instead
     # of `--local_rank`.
@@ -115,6 +121,72 @@ def trigger_visualization_hook(cfg, args):
             '"visualization=dict(type=\'VisualizationHook\')"')
 
     return cfg
+
+
+class _CudaGraphPredictWrapper:
+    """用 CUDA Graph 重放替代 predict 的 GPU forward。
+
+    第一次调用时捕获 model._forward 成图，之后每次 replay；图外补
+    predict_by_feat(resize) + postprocess_result，与 predict 语义一致。
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self._graph = None
+        self._graph_input = None
+        self._graph_output = None
+        self._captured = False
+
+    def _ensure_captured(self, inputs, data_samples):
+        if self._captured:
+            return
+        g_inputs = inputs.detach().clone()
+        # 预热：触发 optimize_for_inference + CUDA 核编译
+        with torch.no_grad():
+            for _ in range(8):
+                self.model._forward(inputs, data_samples)
+        torch.cuda.synchronize()
+        with torch.no_grad():
+            for _ in range(3):
+                self.model._forward(g_inputs, data_samples)
+        torch.cuda.synchronize()
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            with torch.no_grad():
+                out = self.model._forward(g_inputs, data_samples)
+        self._graph = g
+        self._graph_input = g_inputs
+        self._graph_output = out
+        self._captured = True
+        torch.cuda.synchronize()
+        print('CUDA Graph: 捕获完成')
+
+    def __call__(self, inputs, data_samples=None, mode='predict'):
+        if mode != 'predict':
+            return self.model(inputs, data_samples, mode=mode)
+        return self._predict(inputs, data_samples)
+
+    def predict(self, inputs, data_samples=None):
+        """兼容 runner 直接调 model.predict(...) 的路径。"""
+        return self._predict(inputs, data_samples)
+
+    def _predict(self, inputs, data_samples=None):
+        self._ensure_captured(inputs, data_samples)
+        with torch.no_grad():
+            self._graph_input.copy_(inputs)
+            self._graph.replay()
+            torch.cuda.synchronize()
+            if data_samples is not None:
+                metas = [s.metainfo for s in data_samples]
+            else:
+                metas = [dict(
+                    ori_shape=inputs.shape[2:],
+                    img_shape=inputs.shape[2:],
+                    pad_shape=inputs.shape[2:],
+                    padding_size=[0, 0, 0, 0])] * inputs.shape[0]
+            seg_logits = self.model.decode_head.predict_by_feat(
+                self._graph_output, metas)
+            return self.model.postprocess_result(seg_logits, data_samples)
 
 
 def main():
@@ -171,6 +243,19 @@ def main():
 
     # build the runner from config
     runner = Runner.from_cfg(cfg)
+
+    # --cuda-graph：包装模型 predict 用 CUDA Graph 重放 GPU forward
+    if args.cuda_graph:
+        if not torch.cuda.is_available():
+            raise RuntimeError('--cuda-graph 需要 CUDA 设备')
+        _bk = cfg.model.get('backbone', {})
+        _backend = _bk.get('topp_flash_backend')
+        if _backend not in ('cuda', 'cuda_forward'):
+            raise RuntimeError(
+                '--cuda-graph 需要 model.backbone.topp_flash_backend=cuda '
+                '(torch 路径有动态路由形状，无法捕获)。'
+                f'当前 backend={_backend}')
+        runner.model = _CudaGraphPredictWrapper(runner.model)
 
     # start testing
     runner.test()

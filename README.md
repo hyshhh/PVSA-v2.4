@@ -41,6 +41,30 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py \
   --cudnn-benchmark
 ```
 
+### 自定义 CUDA 核推理 + CUDA Graph（最高吞吐）
+
+在 `--cfg-options ... topp_flash_backend=cuda` 基础上加 `--cuda-graph`，
+把模型 forward 捕获成 CUDA Graph 重放，推理可提速约 5 倍（结果与普通
+predict 一致）。predict 后处理在图外执行但计入流程。
+
+```bash
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
+CUDA_VISIBLE_DEVICES=0 python tools/test.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth  \
+  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/vis_results/2 \
+  --cfg-options model.backbone.topp_flash_backend=cuda \
+  model.backbone.topp_flash_debug=false \
+  --input-size 224 224 \
+  --cudnn-benchmark \
+  --cuda-graph
+```
+
+- 首次推理会打印 `CUDA Graph: 捕获完成`（含预热，稍慢），之后每张图重放。
+- 若 `topp_flash_backend` 不是 cuda 会报错（torch 路径有动态路由形状，无法捕获）。
+
 ## FPS 测速
 
 fps 测速、阶段耗时分析、CUDA Graph 高吞吐推理见 **`FPS.md`**。
