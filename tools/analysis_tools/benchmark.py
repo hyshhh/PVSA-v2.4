@@ -61,6 +61,12 @@ def parse_args():
         action='store_true',
         help='skip mmseg predict post-processing, measure pure model '
         'forward (backbone + decode head) only.')
+    parser.add_argument(
+        '--cuda-graph',
+        action='store_true',
+        help='capture the model forward as a CUDA Graph and replay it '
+        '(requires CUDA kernel path with fixed input shape; skips '
+        'predict post-processing).')
     args = parser.parse_args()
     return args
 
@@ -159,6 +165,61 @@ def main():
         num_warmup = min(5, total_iters - 1)
         data_iter = iter(data_loader)
 
+        # ── CUDA Graph 捕获（--cuda-graph）────────────────────────────
+        # 原理：把模型 forward 捕获成一张图，消除每次推理的 kernel launch
+        # 与 Python 调度开销。要求：CUDA 核路径 + 固定输入形状。
+        graph = None
+        graph_input = None
+        if args.cuda_graph and torch.cuda.is_available():
+            # 检查必须使用 CUDA 核路径：torch 路径有动态形状（x[..., :max_len]）
+            # 无法被 CUDA Graph 捕获，会捕获失败或结果错误。
+            _bk = cfg.model.get('backbone', {})
+            _backend = _bk.get('topp_flash_backend')
+            if _backend not in ('cuda', 'cuda_forward'):
+                raise RuntimeError(
+                    '--cuda-graph 需要 model.backbone.topp_flash_backend=cuda '
+                    '(torch 路径有动态路由形状，无法捕获)。'
+                    f'当前 backend={_backend}')
+            print('CUDA Graph: 捕获模型 forward...')
+            # 取第一张输入确定形状（先 build dataloader 已存在）
+            g_inputs = None
+            g_samples = None
+            for gi in range(3):  # 少量预热，触发 optimize_for_inference
+                try:
+                    gdata = next(data_iter)
+                except StopIteration:
+                    data_iter = iter(data_loader)
+                    gdata = next(data_iter)
+                gdata = model.data_preprocessor(gdata, False)
+                g_inputs = gdata['inputs']
+                g_samples = gdata['data_samples']
+                with torch.no_grad():
+                    model(g_inputs, g_samples, mode='tensor')
+            if not isinstance(g_inputs, torch.Tensor):
+                raise RuntimeError('--cuda-graph 需要 inputs 是单张量')
+            # 预热 CUDA 核（触发路由/Flash 核编译）
+            for _ in range(5):
+                with torch.no_grad():
+                    model(g_inputs, g_samples, mode='tensor')
+            torch.cuda.synchronize()
+
+            # 静态输入缓冲：Graph 重放固定用这块内存
+            graph_input = g_inputs.detach().clone()
+            static_samples = g_samples
+            # 用静态输入捕获
+            for _ in range(2):
+                with torch.no_grad():
+                    model(graph_input, static_samples, mode='tensor')
+            torch.cuda.synchronize()
+
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                with torch.no_grad():
+                    model(graph_input, static_samples, mode='tensor')
+            graph = g
+            torch.cuda.synchronize()
+            print('CUDA Graph: 捕获完成')
+
         # benchmark with enough batches and take the average
         for i in range(total_iters):
             try:
@@ -178,7 +239,10 @@ def main():
             start_time = time.perf_counter()
 
             with torch.no_grad():
-                if args.raw:
+                if args.cuda_graph:
+                    graph_input.copy_(inputs)
+                    graph.replay()
+                elif args.raw:
                     # 纯模型 forward（backbone + decode head），跳过 predict 后处理
                     model(inputs, data_samples, mode='tensor')
                 else:
