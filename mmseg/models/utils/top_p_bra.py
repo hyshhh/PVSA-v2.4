@@ -21,6 +21,12 @@ from .topp_flash_kernel import (can_run_topp_route_cuda,
 DEFAULT_ATTN_VIS_CONFIG = dict(enabled=False)
 _TOPP_FLASH_STAGE_LOGGED = set()
 _TOPP_FLASH_STAGE_PROFILED = set()
+# debug 阶段耗时：每个 profile_key 采样 N 次取平均（而不是只测第一次）
+# 增大 N 更稳定，减小 N 更快。可用环境变量覆盖。
+STAGE_PROFILE_N = int(os.getenv('PVSA_STAGE_PROFILE_N', '20'))
+# 每个 profile_key 的采样状态：{key: {stage: 累计ms}} 与计数
+_STAGE_TIMING_SUMS: Dict = {}
+_STAGE_TIMING_COUNT: Dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -574,15 +580,22 @@ class ToppAttention(nn.Module):
         profile_key = (
             self.topp_flash_backend, tuple(x.shape), self.num_heads,
             self.qk_dim, self.dim, self.n_win, self.router.topk)
-        stage_profile = stage_debug and profile_key not in _TOPP_FLASH_STAGE_PROFILED
-        if stage_profile:
-            _TOPP_FLASH_STAGE_PROFILED.add(profile_key)
+        # 采样状态：当前 key 是否还在累计（未达到 STAGE_PROFILE_N）
+        _count = _STAGE_TIMING_COUNT.get(profile_key, 0)
+        _sampling = stage_debug and _count < STAGE_PROFILE_N
+        if _sampling:
+            _STAGE_TIMING_COUNT[profile_key] = _count + 1
+            _sums = _STAGE_TIMING_SUMS.setdefault(profile_key, {})
         stage_times = {}
 
         def run_stage(name, fn):
-            out, elapsed = _time_cuda_stage(stage_profile, x, fn)
-            if elapsed is not None:
-                stage_times[name] = elapsed
+            out, elapsed = _time_cuda_stage(_sampling, x, fn)
+            if elapsed is not None and _sampling:
+                # 累计到该 key 的采样和
+                _sums[name] = _sums.get(name, 0.0) + elapsed
+                # 达到 N 次时，写平均到 stage_times（最后会打印）
+                if _STAGE_TIMING_COUNT[profile_key] == STAGE_PROFILE_N:
+                    stage_times[name] = _sums[name] / STAGE_PROFILE_N
             return out
 
         # patchify, (n, p^2, w, w, c)
@@ -643,13 +656,17 @@ class ToppAttention(nn.Module):
                             energy=self.router.energy,
                             scale=self.router.scale,
                             full_route=full_route,
-                            debug=stage_profile))
+                            debug=_sampling))
                     r_mask = None
-                    if stage_profile:
+                    # Router kernel 内部计时（_maybe_time_debug）：采样期间每次累加
+                    if _sampling:
                         router_kernel_ms = consume_topp_kernel_timing(
                             'Router kernel')
                         if router_kernel_ms is not None:
-                            stage_times['Router kernel'] = router_kernel_ms
+                            _sums['Router kernel'] = _sums.get(
+                                'Router kernel', 0.0) + router_kernel_ms
+                            if _STAGE_TIMING_COUNT[profile_key] == STAGE_PROFILE_N:
+                                stage_times['Router kernel'] = _sums['Router kernel'] / STAGE_PROFILE_N
                 except Exception as exc:
                     warn_topp_route_cuda_fallback(str(exc))
                     r_weight, r_idx, r_mask = run_stage(
@@ -681,12 +698,16 @@ class ToppAttention(nn.Module):
                     H=H,
                     W=W,
                     backend=self.topp_flash_backend,
-                    debug=stage_profile,
+                    debug=_sampling,
                     use_route_weight=self.soft_routing))
-            if stage_profile:
+            # Flash kernel 内部计时：采样期间每次累加
+            if _sampling:
                 flash_kernel_ms = consume_topp_kernel_timing('Flash kernel')
                 if flash_kernel_ms is not None:
-                    stage_times['Flash kernel'] = flash_kernel_ms
+                    _sums['Flash kernel'] = _sums.get(
+                        'Flash kernel', 0.0) + flash_kernel_ms
+                    if _STAGE_TIMING_COUNT[profile_key] == STAGE_PROFILE_N:
+                        stage_times['Flash kernel'] = _sums['Flash kernel'] / STAGE_PROFILE_N
             out = out + lepe
             out = run_stage('wo', lambda: self.wo(out))
             if self.auto_pad and (pad_r > 0 or pad_b > 0):
@@ -694,7 +715,8 @@ class ToppAttention(nn.Module):
             log_path = f'topp_flash_{self.topp_flash_backend or "torch"}'
             if full_route:
                 log_path = f'{log_path}_full_last'
-            if stage_debug:
+            # 第 N 次采样时打印平均（stage_times 存的是 N 次平均）
+            if _sampling and _STAGE_TIMING_COUNT[profile_key] == STAGE_PROFILE_N:
                 _log_topp_stage_debug(
                     log_path, x, q_pix, kv_pix, r_idx,
                     stage_times, self.num_heads, self.qk_dim, self.dim,
@@ -746,7 +768,7 @@ class ToppAttention(nn.Module):
             out = out[:, :H_in, :W_in, :].contiguous()
 
         # torch 路径也支持 debug 打印各阶段耗时，便于与 CUDA 核对比
-        if stage_debug:
+        if _sampling and _STAGE_TIMING_COUNT[profile_key] == STAGE_PROFILE_N:
             log_path = f'torch_block_{self.topp_flash_backend or "torch"}'
             _log_topp_stage_debug(
                 log_path, x, q_pix_4d, kv_pix, r_idx,
