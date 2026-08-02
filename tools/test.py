@@ -295,6 +295,7 @@ def main():
         from mmengine.runner import load_checkpoint as _lc
         _lc(runner.model, args.checkpoint, map_location='cpu')
         runner.model = _CudaGraphPredictWrapper(runner.model)
+        print('[test] CUDA Graph wrapper 已启用，等待首次推理捕获...')
         # 关闭 runner 的自动加载
         runner.load_from = None
         runner._load_from = None
