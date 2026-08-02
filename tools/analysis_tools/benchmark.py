@@ -253,7 +253,9 @@ def main():
             with torch.no_grad():
                 if args.cuda_graph:
                     graph_input.copy_(inputs)
+                    # replay 是异步提交，先同步确保图执行完成，计时才包含 GPU 时间
                     graph.replay()
+                    torch.cuda.synchronize()
                     # 图外补 predict 语义：resize 到原图尺寸 + postprocess
                     # （GPU 小操作 + Python 数据操作，无法进 CUDA Graph，但计时包含）
                     if data_samples is not None:
