@@ -167,7 +167,7 @@ class BiFormer_fusion(VTFormer):
                 x = self.downsample_layers[i](x)
                 x = self.stages[i](x)
                 out.append(x)
-            _tpb._finalize_stage_round()
+            _tpb._finalize_stage_round(x.shape[0])
             return out
 
         for i in range(4):
@@ -177,11 +177,12 @@ class BiFormer_fusion(VTFormer):
             x = self.downsample_layers[i](x)
             if i == 3 and _tpb._STAGE_DEBUG_ACTIVE > 0:
                 # S4 是 plain Attention（不走 ToppAttention），单独计时。
-                # 模式2：逐个 block 计时并立即打印；模式1：整个 stage 累计到图级结算。
+                # 模式2：逐个 block 计时并按每 ROUND_PROFILE_N 张图结算；模式1：
+                # 整个 stage 累计子阶段耗时后结算。
                 _dim4 = self.embed_dim[3]
                 _dbg = _tpb._STAGE_DEBUG_ACTIVE
                 if _dbg >= 2:
-                    # 模式2：逐 block 整块单次计时，立即打印（与 S1..S3 口径一致）
+                    # 模式2：逐 block 整块单次计时，累计后按图数求平均
                     _x4 = x
                     for _bi, _blk in enumerate(self.stages[i]):
                         _tpb._STAGE_BLOCK_INDEX += 1
@@ -189,13 +190,16 @@ class BiFormer_fusion(VTFormer):
                             _xo, _e = _tpb._time_cuda_stage(
                                 _dbg, _x4, lambda b=_blk: b(_x4))
                         if _e is not None:
-                            _tpb._log_topp_stage_debug(
-                                stage=f'S4[{_tpb._STAGE_BLOCK_INDEX}]',
-                                path='plain_attention',
-                                x=tuple(_x4.shape), q_pix=tuple(_x4.shape),
-                                kv_pix=tuple(_x4.shape), r_idx=(),
-                                times={'BLOCK': _e}, num_heads=0,
-                                qk_dim=_dim4, dim=_dim4, n_win=0)
+                            _tpb.add_stage_block_entry(
+                                _dim4, _e,
+                                info=dict(
+                                    path='plain_attention',
+                                    x_shape=tuple(_x4.shape),
+                                    q_shape=tuple(_x4.shape),
+                                    kv_shape=tuple(_x4.shape),
+                                    route_shape=(), num_heads=0,
+                                    qk_dim=_dim4, dim=_dim4, n_win=0),
+                                num_images=_x4.shape[0])
                         _x4 = _xo
                     x = _x4
                 else:
@@ -311,7 +315,7 @@ class BiFormer_fusion(VTFormer):
         if vis_enabled:
             self._feature_vis_saved = True
         # 每图末尾统一结算：满 ROUND 张图打印 S1..S4 各一行
-        _tpb._finalize_stage_round()
+        _tpb._finalize_stage_round(x.shape[0])
         return tuple(out)
 
     def _save_feature_channel_as_image(

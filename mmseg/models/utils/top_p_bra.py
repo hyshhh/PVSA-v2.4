@@ -104,24 +104,25 @@ def _stage_debug_name(dim: int) -> str:
     return _known.get(dim, f'S{dim}')
 
 
-def _finalize_stage_round():
-    """主干每图 forward 末尾调用。
+def _clear_stage_round():
+    global _STAGE_ROUND_COUNT
+    _STAGE_ROUND_COUNT = 0
+    _STAGE_ROUND_SUMS.clear()
+    _STAGE_ROUND_SAMPLE.clear()
+    _STAGE_ROUND_INFO.clear()
 
-    图级滚动结算：满 ROUND_PROFILE_N 张图时，把 S1..S4 每个 stage 的
-    平均耗时打印成一行（每个 stage 一行），并清空累计状态。
-    在 ToppAttention forward 里累计到 _STAGE_ROUND_SUMS/_STAGE_ROUND_SAMPLE，
-    S4 的 plain Attention 由主干用 add_stage_round_entry 累计。
-    """
+
+def _finalize_stage_round(num_images: int = 1):
+    """主干每次 forward 末尾调用，按图数结算阶段统计。"""
     global _STAGE_ROUND_COUNT
     if _STAGE_DEBUG_ACTIVE <= 0:
         return
-    if _STAGE_DEBUG_ACTIVE >= 2:
-        # 模式2：每个 block 已立即打印，无需图级结算
-        return
-    _STAGE_ROUND_COUNT += 1
+
+    _STAGE_ROUND_COUNT += max(int(num_images), 1)
     if _STAGE_ROUND_COUNT < ROUND_PROFILE_N:
         return
-    # 结算：对每个有数据的 dim 打印一行
+
+    # 模式1：打印各 stage 的子阶段平均耗时；模式2：只打印 PVSA block 平均耗时。
     for dim in sorted(_STAGE_ROUND_SUMS.keys()):
         sums = _STAGE_ROUND_SUMS[dim]
         samples = _STAGE_ROUND_SAMPLE.get(dim, {})
@@ -133,6 +134,11 @@ def _finalize_stage_round():
                 times[name] = total / _s
         if not times:
             continue
+        if _STAGE_DEBUG_ACTIVE >= 2:
+            block_avg = times.get('BLOCK')
+            if block_avg is None:
+                continue
+            times = {'BLOCK_AVG': block_avg}
         _log_topp_stage_debug(
             stage=_stage_debug_name(dim),
             path=info.get('path', 'unknown'),
@@ -144,12 +150,12 @@ def _finalize_stage_round():
             num_heads=info.get('num_heads', 0),
             qk_dim=info.get('qk_dim', 0),
             dim=dim,
-            n_win=info.get('n_win', 0))
-    # 清空，下一窗口重新累计
-    _STAGE_ROUND_COUNT = 0
-    _STAGE_ROUND_SUMS.clear()
-    _STAGE_ROUND_SAMPLE.clear()
-    _STAGE_ROUND_INFO.clear()
+            n_win=info.get('n_win', 0),
+            profile_images=(_STAGE_ROUND_COUNT
+                            if _STAGE_DEBUG_ACTIVE >= 2 else None),
+            profile_blocks=(samples.get('BLOCK', 0)
+                            if _STAGE_DEBUG_ACTIVE >= 2 else None))
+    _clear_stage_round()
 
 
 def add_stage_round_entry(dim: int, name: str, elapsed_ms: Optional[float]):
@@ -157,17 +163,33 @@ def add_stage_round_entry(dim: int, name: str, elapsed_ms: Optional[float]):
     if _STAGE_DEBUG_ACTIVE <= 0 or elapsed_ms is None:
         return
     if _STAGE_DEBUG_ACTIVE >= 2:
-        return  # 模式2：逐 block 立即打印，不走图级累计
+        return
     _STAGE_ROUND_SUMS.setdefault(dim, {})[name] = (
         _STAGE_ROUND_SUMS.get(dim, {}).get(name, 0.0) + elapsed_ms)
     _STAGE_ROUND_SAMPLE.setdefault(dim, {}).setdefault(name, 0)
     _STAGE_ROUND_SAMPLE[dim][name] += 1
 
 
+def add_stage_block_entry(dim: int, elapsed_ms: Optional[float], info: Optional[Dict] = None,
+                          num_images: int = 1):
+    """累计模式2的整块耗时，按输入图数归一化。"""
+    if (_STAGE_DEBUG_ACTIVE < 2 or elapsed_ms is None
+            or not np.isfinite(elapsed_ms)):
+        return
+    elapsed_ms = float(elapsed_ms) / max(int(num_images), 1)
+    _STAGE_ROUND_SUMS.setdefault(dim, {})['BLOCK'] = (
+        _STAGE_ROUND_SUMS.get(dim, {}).get('BLOCK', 0.0) + elapsed_ms)
+    _STAGE_ROUND_SAMPLE.setdefault(dim, {})['BLOCK'] = (
+        _STAGE_ROUND_SAMPLE.get(dim, {}).get('BLOCK', 0) + 1)
+    if info:
+        _STAGE_ROUND_INFO.setdefault(dim, {}).update(info)
+
+
 def _log_topp_stage_debug(stage: str, path: str, x, q_pix, kv_pix,
                           r_idx, times: Dict[str, float],
                           num_heads: int, qk_dim: int, dim: int,
-                          n_win: int) -> None:
+                          n_win: int, profile_images: Optional[int] = None,
+                          profile_blocks: Optional[int] = None) -> None:
     def _shp(t):
         return tuple(t.shape) if hasattr(t, 'shape') else tuple(t)
     route_shape = tuple(r_idx.shape) if hasattr(r_idx, 'shape') else tuple(r_idx)
@@ -175,12 +197,17 @@ def _log_topp_stage_debug(stage: str, path: str, x, q_pix, kv_pix,
         ' '.join(f'{name}={elapsed:.4f}ms'
                  for name, elapsed in times.items())
         if times else 'timing=off')
+    profile = ''
+    if profile_images is not None:
+        profile = f' images={profile_images}'
+        if profile_blocks is not None:
+            profile += f' blocks={profile_blocks}'
     print(
         '[PVSA TopP Stage] '
         f'stage={stage} path={path} x={_shp(x)} q={_shp(q_pix)} '
         f'kv={_shp(kv_pix)} route={route_shape} '
         f'heads={num_heads} qk_dim={qk_dim} dim={dim} n_win={n_win} '
-        f'{parts}')
+        f'{parts}{profile}')
 
 
 # ---------------------------------------------------------------------------
@@ -898,9 +925,9 @@ class ToppAttention(nn.Module):
         模式0（关闭）：直接跑 _forward_impl，零开销。
         模式1（图级滚动）：_forward_impl 内部逐子阶段计时，累计到图级结算。
         模式2（每 block 单次）：用一对 CUDA Event 包住整个 PVSA block
-            （qkv→wo）只同步一次，得到干净的单 block GPU 耗时，立即打印
-            'BLOCK=..ms'。此时 _forward_impl 内部不做子阶段计时（避免
-            分段插事件+同步高估真实耗时）。
+            （qkv→wo）只同步一次，得到干净的单 block GPU 耗时；累计满
+            ROUND_PROFILE_N 张图后，按 stage 打印 BLOCK_AVG。此时
+            _forward_impl 内部不做子阶段计时（避免分段插事件+同步高估真实耗时）。
         实验（PVSA_BLOCK_TOTAL_ONLY=1 + 模式1）：整 block 单测累进
             'BLOCK_TOTAL' 列，与分阶段计时同表对比。
         """
@@ -912,8 +939,7 @@ class ToppAttention(nn.Module):
         if torch.cuda.is_current_stream_capturing():
             return self._forward_impl(x, GA, ret_attn_mask)
         if _STAGE_DEBUG_ACTIVE >= 2:
-            # 模式2：整 block 单次计时，立即打印
-            _STAGE_BLOCK_INDEX += 1
+            # 模式2：整 block 单次计时，累计到每 ROUND_PROFILE_N 张图结算。
             with torch.no_grad():
                 with torch.cuda.device(x.device):
                     start = torch.cuda.Event(enable_timing=True)
@@ -923,13 +949,15 @@ class ToppAttention(nn.Module):
                     end.record()
                     end.synchronize()
                     elapsed = start.elapsed_time(end)
-            _log_topp_stage_debug(
-                stage=f'{_stage_debug_name(self.dim)}[{_STAGE_BLOCK_INDEX}]',
-                path=f'topp_flash_{self.topp_flash_backend or "torch"}',
-                x=tuple(x.shape), q_pix=tuple(x.shape),
-                kv_pix=tuple(x.shape), r_idx=(),
-                times={'BLOCK': elapsed}, num_heads=self.num_heads,
-                qk_dim=self.qk_dim, dim=self.dim, n_win=self.n_win)
+            add_stage_block_entry(
+                self.dim, elapsed,
+                info=dict(
+                    path=f'topp_flash_{self.topp_flash_backend or "torch"}',
+                    x_shape=tuple(x.shape), q_shape=tuple(x.shape),
+                    kv_shape=tuple(x.shape), route_shape=(),
+                    num_heads=self.num_heads, qk_dim=self.qk_dim,
+                    dim=self.dim, n_win=self.n_win),
+                num_images=x.shape[0])
             if ret_attn_mask:
                 return out
             return out
