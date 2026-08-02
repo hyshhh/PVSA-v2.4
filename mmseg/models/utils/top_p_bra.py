@@ -79,12 +79,8 @@ def _log_topp_stage_debug(path: str, x: Tensor, q_pix: Tensor, kv_pix: Tensor,
                           num_heads: int, qk_dim: int, dim: int,
                           n_win: int) -> None:
     route_shape = tuple(r_idx.shape) if hasattr(r_idx, 'shape') else tuple(r_idx)
-    key = (
-        path, tuple(x.shape), tuple(q_pix.shape), tuple(kv_pix.shape),
-        route_shape, num_heads, qk_dim, dim, n_win)
-    if key in _TOPP_FLASH_STAGE_LOGGED:
-        return
-    _TOPP_FLASH_STAGE_LOGGED.add(key)
+    # 注意：不再去重——每满 STAGE_PROFILE_N 次采样会重复打印该 stage 的平均，
+    # 便于观察耗时的滚动变化。
     parts = (
         ' '.join(f'{name}={elapsed:.4f}ms'
                  for name, elapsed in times.items())
@@ -580,9 +576,11 @@ class ToppAttention(nn.Module):
         profile_key = (
             self.topp_flash_backend, tuple(x.shape), self.num_heads,
             self.qk_dim, self.dim, self.n_win, self.router.topk)
-        # 采样状态：当前 key 是否还在累计（未达到 STAGE_PROFILE_N）
+        # 滚动采样：只要 debug 开启就一直采样；每满 STAGE_PROFILE_N 次
+        # 结算一次平均并打印。同一 profile_key 覆盖该 stage 的所有 block
+        # （同形状），因此统计的是该 stage 所有 block 的平均耗时。
         _count = _STAGE_TIMING_COUNT.get(profile_key, 0)
-        _sampling = stage_debug and _count < STAGE_PROFILE_N
+        _sampling = stage_debug
         if _sampling:
             _STAGE_TIMING_COUNT[profile_key] = _count + 1
             _sums = _STAGE_TIMING_SUMS.setdefault(profile_key, {})
@@ -593,10 +591,18 @@ class ToppAttention(nn.Module):
             if elapsed is not None and _sampling:
                 # 累计到该 key 的采样和
                 _sums[name] = _sums.get(name, 0.0) + elapsed
-                # 达到 N 次时，写平均到 stage_times（最后会打印）
-                if _STAGE_TIMING_COUNT[profile_key] == STAGE_PROFILE_N:
-                    stage_times[name] = _sums[name] / STAGE_PROFILE_N
             return out
+
+        def _maybe_settle():
+            """每满 N 次采样：把累计和转成平均写入 stage_times，并清空计数。"""
+            if not _sampling or _STAGE_TIMING_COUNT[profile_key] < STAGE_PROFILE_N:
+                return False
+            for name, total in _sums.items():
+                stage_times[name] = total / STAGE_PROFILE_N
+            # 清空，下一窗口重新累计
+            _STAGE_TIMING_COUNT[profile_key] = 0
+            _STAGE_TIMING_SUMS[profile_key] = {}
+            return True
 
         # patchify, (n, p^2, w, w, c)
         x = rearrange(x, "n (j h) (i w) c -> n (j i) h w c", j=self.n_win, i=self.n_win)
@@ -665,8 +671,6 @@ class ToppAttention(nn.Module):
                         if router_kernel_ms is not None:
                             _sums['Router kernel'] = _sums.get(
                                 'Router kernel', 0.0) + router_kernel_ms
-                            if _STAGE_TIMING_COUNT[profile_key] == STAGE_PROFILE_N:
-                                stage_times['Router kernel'] = _sums['Router kernel'] / STAGE_PROFILE_N
                 except Exception as exc:
                     warn_topp_route_cuda_fallback(str(exc))
                     r_weight, r_idx, r_mask = run_stage(
@@ -706,8 +710,6 @@ class ToppAttention(nn.Module):
                 if flash_kernel_ms is not None:
                     _sums['Flash kernel'] = _sums.get(
                         'Flash kernel', 0.0) + flash_kernel_ms
-                    if _STAGE_TIMING_COUNT[profile_key] == STAGE_PROFILE_N:
-                        stage_times['Flash kernel'] = _sums['Flash kernel'] / STAGE_PROFILE_N
             out = out + lepe
             out = run_stage('wo', lambda: self.wo(out))
             if self.auto_pad and (pad_r > 0 or pad_b > 0):
@@ -715,8 +717,8 @@ class ToppAttention(nn.Module):
             log_path = f'topp_flash_{self.topp_flash_backend or "torch"}'
             if full_route:
                 log_path = f'{log_path}_full_last'
-            # 第 N 次采样时打印平均（stage_times 存的是 N 次平均）
-            if _sampling and _STAGE_TIMING_COUNT[profile_key] == STAGE_PROFILE_N:
+            # 每满 N 次采样结算一次：打印该 stage 所有 block 的平均耗时
+            if _maybe_settle():
                 _log_topp_stage_debug(
                     log_path, x, q_pix, kv_pix, r_idx,
                     stage_times, self.num_heads, self.qk_dim, self.dim,
@@ -768,7 +770,7 @@ class ToppAttention(nn.Module):
             out = out[:, :H_in, :W_in, :].contiguous()
 
         # torch 路径也支持 debug 打印各阶段耗时，便于与 CUDA 核对比
-        if _sampling and _STAGE_TIMING_COUNT[profile_key] == STAGE_PROFILE_N:
+        if _maybe_settle():
             log_path = f'torch_block_{self.topp_flash_backend or "torch"}'
             _log_topp_stage_debug(
                 log_path, x, q_pix_4d, kv_pix, r_idx,
