@@ -255,7 +255,14 @@ def main():
                 '--cuda-graph 需要 model.backbone.topp_flash_backend=cuda '
                 '(torch 路径有动态路由形状，无法捕获)。'
                 f'当前 backend={_backend}')
+        # 手动加载权重到原模型，避免 runner.test() 内部重复加载时
+        # wrapper 拦截 _load_from_state_dict 而崩溃。
+        from mmengine.runner import load_checkpoint as _lc
+        _lc(runner.model, args.checkpoint, map_location='cpu')
         runner.model = _CudaGraphPredictWrapper(runner.model)
+        # 关闭 runner 的自动加载
+        runner.load_from = None
+        runner._load_from = None
 
     # start testing
     runner.test()
