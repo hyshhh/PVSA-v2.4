@@ -69,24 +69,3 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py \
 ## FPS 测速
 
 fps 测速、阶段耗时分析、CUDA Graph 高吞吐推理见 **`FPS.md`**。
-
-## PVSA 阶段耗时分析（`topp_flash_debug`）
-
-`model.backbone.topp_flash_debug` 三档：
-
-| 值 | 含义 |
-|---|---|
-| `0`（或 `false`） | 关闭计时 |
-| `1` | 每 100 张图，S1..S4 每个 stage 各一行平均耗时 |
-| `2` | 每个 PVSA-block 单独一行（`S1[1]`、`S1[2]`...） |
-
-用法示例（benchmark 测速时附加计时）：
-
-```bash
---cfg-options model.backbone.topp_flash_backend=cuda \
-  model.backbone.topp_flash_debug=2 \
-  --input-size 224 224 \
-  --cudnn-benchmark
-```
-
-详细说明与 `BLOCK_TOTAL` 整 block 对照实验见 **`FPS.md` 第 5 节**。
