@@ -57,16 +57,11 @@ def parse_args():
         help='override test input resolution, e.g. --input-size 512 512. '
         'Also updates data_preprocessor size and Resize pipeline.')
     parser.add_argument(
-        '--raw',
-        action='store_true',
-        help='skip mmseg predict post-processing, measure pure model '
-        'forward (backbone + decode head) only.')
-    parser.add_argument(
         '--cuda-graph',
         action='store_true',
         help='capture the model forward as a CUDA Graph and replay it '
-        '(requires CUDA kernel path with fixed input shape; skips '
-        'predict post-processing).')
+        '(requires CUDA kernel path with fixed input shape; predict '
+        'post-processing runs outside the graph but is still timed).')
     args = parser.parse_args()
     return args
 
@@ -166,10 +161,14 @@ def main():
         data_iter = iter(data_loader)
 
         # ── CUDA Graph 捕获（--cuda-graph）────────────────────────────
-        # 原理：把模型 forward 捕获成一张图，消除每次推理的 kernel launch
+        # 原理：把模型 GPU forward 捕获成一张图，消除每次推理的 kernel launch
         # 与 Python 调度开销。要求：CUDA 核路径 + 固定输入形状。
+        # predict 后处理（postprocess_result）是纯 Python 数据操作，无法进图，
+        # 放在图外执行，计时仍包含完整 predict 流程。
         graph = None
         graph_input = None
+        graph_output = None
+        static_metas = None
         if args.cuda_graph and torch.cuda.is_available():
             # 检查必须使用 CUDA 核路径：torch 路径有动态形状（x[..., :max_len]）
             # 无法被 CUDA Graph 捕获，会捕获失败或结果错误。
@@ -194,28 +193,41 @@ def main():
                 g_inputs = gdata['inputs']
                 g_samples = gdata['data_samples']
                 with torch.no_grad():
-                    model(g_inputs, g_samples, mode='tensor')
+                    model._forward(g_inputs, g_samples)
             if not isinstance(g_inputs, torch.Tensor):
                 raise RuntimeError('--cuda-graph 需要 inputs 是单张量')
             # 预热 CUDA 核（触发路由/Flash 核编译）
             for _ in range(5):
                 with torch.no_grad():
-                    model(g_inputs, g_samples, mode='tensor')
+                    model._forward(g_inputs, g_samples)
             torch.cuda.synchronize()
 
             # 静态输入缓冲：Graph 重放固定用这块内存
             graph_input = g_inputs.detach().clone()
             static_samples = g_samples
+            # 提取 batch_img_metas（与 predict 一致）
+            if static_samples is not None:
+                static_metas = [
+                    s.metainfo for s in static_samples
+                ]
+            else:
+                static_metas = [
+                    dict(
+                        ori_shape=g_inputs.shape[2:],
+                        img_shape=g_inputs.shape[2:],
+                        pad_shape=g_inputs.shape[2:],
+                        padding_size=[0, 0, 0, 0])
+                ] * g_inputs.shape[0]
             # 用静态输入捕获
             for _ in range(2):
                 with torch.no_grad():
-                    model(graph_input, static_samples, mode='tensor')
+                    model._forward(graph_input, static_samples)
             torch.cuda.synchronize()
 
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
                 with torch.no_grad():
-                    model(graph_input, static_samples, mode='tensor')
+                    graph_output = model._forward(graph_input, static_samples)
             graph = g
             torch.cuda.synchronize()
             print('CUDA Graph: 捕获完成')
@@ -242,9 +254,15 @@ def main():
                 if args.cuda_graph:
                     graph_input.copy_(inputs)
                     graph.replay()
-                elif args.raw:
-                    # 纯模型 forward（backbone + decode head），跳过 predict 后处理
-                    model(inputs, data_samples, mode='tensor')
+                    # 图外补 predict 语义：resize 到原图尺寸 + postprocess
+                    # （GPU 小操作 + Python 数据操作，无法进 CUDA Graph，但计时包含）
+                    if data_samples is not None:
+                        metas = [s.metainfo for s in data_samples]
+                    else:
+                        metas = static_metas
+                    seg_logits = model.decode_head.predict_by_feat(
+                        graph_output, metas)
+                    model.postprocess_result(seg_logits, data_samples)
                 else:
                     model(inputs, data_samples, mode='predict')
 
