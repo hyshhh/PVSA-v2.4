@@ -98,7 +98,12 @@ def main():
         pre = cfg.model.get('data_preprocessor')
         if pre is not None:
             pre['size'] = (h, w)
+        # 诊断：打印修改后的 pipeline 与 preprocessor，确认参数生效
+        _resize = [t for t in cfg.test_dataloader.dataset.pipeline
+                   if t.get('type') in ('Resize', 'RandomResize')]
         print(f'test input size = ({h}, {w})')
+        print(f'  pipeline Resize scale = {_resize}')
+        print(f'  data_preprocessor.size = {pre.get("size") if pre else None}')
 
     init_default_scope(cfg.get('default_scope', 'mmseg'))
 
