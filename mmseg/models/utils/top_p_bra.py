@@ -32,7 +32,8 @@ _STAGE_ROUND_COUNT = 0                            # 当前窗口内已处理的�
 _STAGE_ROUND_SUMS: Dict[int, Dict[str, float]] = {}   # dim -> {子阶段: ms累计}
 _STAGE_ROUND_SAMPLE: Dict[int, Dict[str, int]] = {}   # dim -> {子阶段: 采样次数}
 _STAGE_ROUND_INFO: Dict[int, Dict] = {}               # dim -> 打印用元信息
-_STAGE_DEBUG_ACTIVE = False                           # 主干每图 forward 时设置
+_STAGE_DEBUG_ACTIVE = 0                              # 主干每图 forward 时设置：0/1/2 档位
+_STAGE_BLOCK_INDEX = 0                               # 模式2：当前 block 序号（每图重置）
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +47,18 @@ def _normalize_topp_backend(backend: Optional[str]) -> Optional[str]:
     if backend in ('', 'none', 'false', 'off'):
         return None
     return backend
+
+
+def _normalize_flash_debug(debug) -> int:
+    """topp_flash_debug 归一化为三档：0=关闭，1=图级滚动(每ROUND张S1..S4各一行)，
+    2=每个PVSA-block单独打印。兼容旧的 True/False/0/1/2 及字符串形式。"""
+    if isinstance(debug, bool):
+        return 2 if debug else 0  # 旧 True 兼容：走最详细的 block 级打印
+    try:
+        v = int(debug)
+    except (TypeError, ValueError):
+        return 0
+    return 0 if v <= 0 else (2 if v >= 2 else 1)
 
 
 def _use_topp_cuda_backend(backend: Optional[str]) -> bool:
@@ -100,7 +113,10 @@ def _finalize_stage_round():
     S4 的 plain Attention 由主干用 add_stage_round_entry 累计。
     """
     global _STAGE_ROUND_COUNT
-    if not _STAGE_DEBUG_ACTIVE:
+    if _STAGE_DEBUG_ACTIVE <= 0:
+        return
+    if _STAGE_DEBUG_ACTIVE >= 2:
+        # 模式2：每个 block 已立即打印，无需图级结算
         return
     _STAGE_ROUND_COUNT += 1
     if _STAGE_ROUND_COUNT < ROUND_PROFILE_N:
@@ -137,9 +153,11 @@ def _finalize_stage_round():
 
 
 def add_stage_round_entry(dim: int, name: str, elapsed_ms: Optional[float]):
-    """供主干累计 S4 等非 ToppAttention 阶段的耗时。"""
-    if not _STAGE_DEBUG_ACTIVE or elapsed_ms is None:
+    """供主干累计 S4 等非 ToppAttention 阶段的耗时（仅模式1）。"""
+    if _STAGE_DEBUG_ACTIVE <= 0 or elapsed_ms is None:
         return
+    if _STAGE_DEBUG_ACTIVE >= 2:
+        return  # 模式2：逐 block 立即打印，不走图级累计
     _STAGE_ROUND_SUMS.setdefault(dim, {})[name] = (
         _STAGE_ROUND_SUMS.get(dim, {}).get(name, 0.0) + elapsed_ms)
     _STAGE_ROUND_SAMPLE.setdefault(dim, {}).setdefault(name, 0)
@@ -644,11 +662,20 @@ class ToppAttention(nn.Module):
         ###################################################
 
         # Profiling setup (inference only)
-        stage_debug = self.topp_flash_debug and not ret_attn_mask
+        # topp_flash_debug 三档：0=关闭，1=图级滚动（每 ROUND 张 S1..S4 各一行），
+        # 2=每个 PVSA-block 单独打印一行（含 block 序号）。
+        _self_debug = _normalize_flash_debug(self.topp_flash_debug)
+        stage_debug = (_self_debug > 0) and (not ret_attn_mask)
         # 图级滚动累计：同一 dim 的所有 block 属于同一 stage（S1..S4），
         # 每张图把各 block 的子阶段耗时累进 _STAGE_ROUND_SUMS[dim]，
         # 主干每图 forward 末尾调用 _finalize_stage_round() 决定是否结算打印。
-        _sampling = stage_debug and _STAGE_DEBUG_ACTIVE
+        _sampling = stage_debug and _STAGE_DEBUG_ACTIVE > 0
+        _block_mode = stage_debug and _STAGE_DEBUG_ACTIVE >= 2
+        if _block_mode:
+            # 每个 block 单独计时，用每 block 的临时累计
+            _block_sum: Dict[str, float] = {}
+            _block_sample: Dict[str, int] = {}
+            _STAGE_BLOCK_INDEX += 1
         if _sampling:
             _round_sum = _STAGE_ROUND_SUMS.setdefault(self.dim, {})
             _round_sample = _STAGE_ROUND_SAMPLE.setdefault(self.dim, {})
@@ -657,18 +684,29 @@ class ToppAttention(nn.Module):
         def run_stage(name, fn):
             out, elapsed = _time_cuda_stage(_sampling, x, fn)
             if elapsed is not None and _sampling:
-                # 累计到该 stage(dim) 的采样和
-                _round_sum[name] = _round_sum.get(name, 0.0) + elapsed
-                _round_sample[name] = _round_sample.get(name, 0) + 1
+                if _block_mode:
+                    _block_sum[name] = _block_sum.get(name, 0.0) + elapsed
+                    _block_sample[name] = _block_sample.get(name, 0) + 1
+                else:
+                    # 累计到该 stage(dim) 的采样和
+                    _round_sum[name] = _round_sum.get(name, 0.0) + elapsed
+                    _round_sample[name] = _round_sample.get(name, 0) + 1
             return out
 
         def _maybe_settle():
-            """结算由主干每图 forward 末尾统一触发（见 _finalize_stage_round）。
+            """模式1：由主干每图 forward 末尾统一结算（见 _finalize_stage_round）。
 
             这里只把本 block 累计到的子阶段平均写进 stage_times，供打印行使用。
+            模式2：直接返回本 block 的累计平均，由调用点立即打印。
             """
             if not _sampling:
                 return False
+            if _block_mode:
+                for name in _block_sum:
+                    _s = _block_sample.get(name, 0)
+                    if _s > 0:
+                        stage_times[name] = _block_sum[name] / _s
+                return True  # 模式2：本 block 已累计完，立即打印
             for name in _round_sum:
                 _s = _round_sample.get(name, 0)
                 if _s > 0:
@@ -740,10 +778,16 @@ class ToppAttention(nn.Module):
                         router_kernel_ms = consume_topp_kernel_timing(
                             'Router kernel')
                         if router_kernel_ms is not None:
-                            _round_sum['Router kernel'] = _round_sum.get(
-                                'Router kernel', 0.0) + router_kernel_ms
-                            _round_sample['Router kernel'] = _round_sample.get(
-                                'Router kernel', 0) + 1
+                            if _block_mode:
+                                _block_sum['Router kernel'] = _block_sum.get(
+                                    'Router kernel', 0.0) + router_kernel_ms
+                                _block_sample['Router kernel'] = _block_sample.get(
+                                    'Router kernel', 0) + 1
+                            else:
+                                _round_sum['Router kernel'] = _round_sum.get(
+                                    'Router kernel', 0.0) + router_kernel_ms
+                                _round_sample['Router kernel'] = _round_sample.get(
+                                    'Router kernel', 0) + 1
                 except Exception as exc:
                     warn_topp_route_cuda_fallback(str(exc))
                     r_weight, r_idx, r_mask = run_stage(
@@ -781,15 +825,22 @@ class ToppAttention(nn.Module):
             if _sampling:
                 flash_kernel_ms = consume_topp_kernel_timing('Flash kernel')
                 if flash_kernel_ms is not None:
-                    _round_sum['Flash kernel'] = _round_sum.get(
-                        'Flash kernel', 0.0) + flash_kernel_ms
-                    _round_sample['Flash kernel'] = _round_sample.get(
-                        'Flash kernel', 0) + 1
+                    if _block_mode:
+                        _block_sum['Flash kernel'] = _block_sum.get(
+                            'Flash kernel', 0.0) + flash_kernel_ms
+                        _block_sample['Flash kernel'] = _block_sample.get(
+                            'Flash kernel', 0) + 1
+                    else:
+                        _round_sum['Flash kernel'] = _round_sum.get(
+                            'Flash kernel', 0.0) + flash_kernel_ms
+                        _round_sample['Flash kernel'] = _round_sample.get(
+                            'Flash kernel', 0) + 1
             out = out + lepe
             out = run_stage('wo', lambda: self.wo(out))
             if self.auto_pad and (pad_r > 0 or pad_b > 0):
                 out = out[:, :H_in, :W_in, :].contiguous()
-            # 记录打印元信息；结算打印由主干每图 forward 末尾统一触发
+            # 记录打印元信息；模式1由主干每图 forward 末尾统一结算，
+            # 模式2由 _maybe_settle 返回 True 时立即打印（含 block 序号）。
             if _sampling:
                 _STAGE_ROUND_INFO.setdefault(self.dim, dict(
                     path=f'topp_flash_{self.topp_flash_backend or "torch"}',
@@ -801,7 +852,15 @@ class ToppAttention(nn.Module):
                     qk_dim=self.qk_dim,
                     dim=self.dim,
                     n_win=self.n_win))
-            _maybe_settle()
+            if _maybe_settle():
+                _log_topp_stage_debug(
+                    stage=f'{_stage_debug_name(self.dim)}'
+                          f'[{_STAGE_BLOCK_INDEX}]',
+                    path=f'topp_flash_{self.topp_flash_backend or "torch"}',
+                    x=tuple(x.shape), q_pix=tuple(q_pix.shape),
+                    kv_pix=tuple(kv_pix.shape), r_idx=tuple(r_idx.shape),
+                    times=stage_times, num_heads=self.num_heads,
+                    qk_dim=self.qk_dim, dim=self.dim, n_win=self.n_win)
             return out
 
         # ==================== Standard PyTorch path (V1.1 training) ====================
@@ -849,7 +908,7 @@ class ToppAttention(nn.Module):
             out = out[:, :H_in, :W_in, :].contiguous()
 
         # torch 路径也支持 debug 累计各阶段耗时，便于与 CUDA 核对比。
-        # 结算打印由主干每图 forward 末尾统一触发。
+        # 模式1结算由主干每图 forward 末尾统一触发；模式2立即打印。
         if _sampling:
             _STAGE_ROUND_INFO.setdefault(self.dim, dict(
                 path=f'torch_block_{self.topp_flash_backend or "torch"}',
@@ -861,7 +920,14 @@ class ToppAttention(nn.Module):
                 qk_dim=self.qk_dim,
                 dim=self.dim,
                 n_win=self.n_win))
-        _maybe_settle()
+        if _maybe_settle():
+            _log_topp_stage_debug(
+                stage=f'{_stage_debug_name(self.dim)}[{_STAGE_BLOCK_INDEX}]',
+                path=f'torch_block_{self.topp_flash_backend or "torch"}',
+                x=tuple(x.shape), q_pix=tuple(q_pix_4d.shape),
+                kv_pix=tuple(kv_pix.shape), r_idx=tuple(r_idx.shape),
+                times=stage_times, num_heads=self.num_heads,
+                qk_dim=self.qk_dim, dim=self.dim, n_win=self.n_win)
 
         if ret_attn_mask:
             return out, r_weight, r_idx, attn_weight
@@ -878,7 +944,8 @@ class ToppAttention(nn.Module):
         """
         if not BLOCK_TOTAL_ONLY or not torch.cuda.is_available() or x is None:
             return self._forward_impl(x, GA, ret_attn_mask)
-        if not x.is_cuda or not self.topp_flash_debug or not _STAGE_DEBUG_ACTIVE:
+        if (not x.is_cuda or _normalize_flash_debug(self.topp_flash_debug) <= 0
+                or _STAGE_DEBUG_ACTIVE != 1):
             return self._forward_impl(x, GA, ret_attn_mask)
         if torch.cuda.is_current_stream_capturing():
             return self._forward_impl(x, GA, ret_attn_mask)

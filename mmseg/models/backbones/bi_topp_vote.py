@@ -893,29 +893,50 @@ class VTFormer(nn.Module):
     def forward_features(self, x):
         # 图级 debug 计时开关：由 backbone.topp_flash_debug 控制，
         # 与 ToppAttention 内采样共用；每图末尾统一结算（每 ROUND 张打印一次）。
-        _tpb._STAGE_DEBUG_ACTIVE = bool(self.topp_flash_debug)
+        _tpb._STAGE_DEBUG_ACTIVE = _tpb._normalize_flash_debug(
+            self.topp_flash_debug)
+        _tpb._STAGE_BLOCK_INDEX = 0
         for i in range(4):
             x = self.downsample_layers[i](x)  # res = (56, 28, 14, 7), wins = (64, 16, 4, 1)
-            if i == 3 and self.topp_flash_debug:
-                # S4 是 plain Attention（不走 ToppAttention），单独计时累计，
-                # 与 S1..S3 共用图级结算，凑成 S1..S4 四行。
+            if i == 3 and _tpb._STAGE_DEBUG_ACTIVE > 0:
+                # S4 是 plain Attention（不走 ToppAttention），单独计时。
+                # 模式2：逐个 block 计时并立即打印；模式1：整个 stage 累计到图级结算。
                 _dim4 = self.embed_dim[3]
-                with torch.no_grad():
-                    out4, elapsed4 = _tpb._time_cuda_stage(
-                        _tpb._STAGE_DEBUG_ACTIVE, x, lambda: self.stages[i](x))
-                if elapsed4 is not None:
-                    _tpb.add_stage_round_entry(_dim4, 'attn', elapsed4)
-                    _tpb._STAGE_ROUND_INFO.setdefault(_dim4, dict(
-                        path='plain_attention',
-                        x_shape=tuple(x.shape),
-                        q_shape=tuple(x.shape),
-                        kv_shape=tuple(x.shape),
-                        route_shape=(),
-                        num_heads=0,
-                        qk_dim=_dim4,
-                        dim=_dim4,
-                        n_win=0))
-                x = out4
+                _dbg = _tpb._STAGE_DEBUG_ACTIVE
+                if _dbg >= 2:
+                    _x4 = x
+                    for _bi, _blk in enumerate(self.stages[i]):
+                        _tpb._STAGE_BLOCK_INDEX += 1
+                        with torch.no_grad():
+                            _xo, _e = _tpb._time_cuda_stage(
+                                _dbg, _x4, lambda b=_blk: b(_x4))
+                        if _e is not None:
+                            _tpb._log_topp_stage_debug(
+                                stage=f'S4[{_tpb._STAGE_BLOCK_INDEX}]',
+                                path='plain_attention',
+                                x=tuple(_x4.shape), q_pix=tuple(_x4.shape),
+                                kv_pix=tuple(_x4.shape), r_idx=(),
+                                times={'attn': _e}, num_heads=0,
+                                qk_dim=_dim4, dim=_dim4, n_win=0)
+                        _x4 = _xo
+                    x = _x4
+                else:
+                    with torch.no_grad():
+                        out4, elapsed4 = _tpb._time_cuda_stage(
+                            _dbg, x, lambda: self.stages[i](x))
+                    if elapsed4 is not None:
+                        _tpb.add_stage_round_entry(_dim4, 'attn', elapsed4)
+                        _tpb._STAGE_ROUND_INFO.setdefault(_dim4, dict(
+                            path='plain_attention',
+                            x_shape=tuple(x.shape),
+                            q_shape=tuple(x.shape),
+                            kv_shape=tuple(x.shape),
+                            route_shape=(),
+                            num_heads=0,
+                            qk_dim=_dim4,
+                            dim=_dim4,
+                            n_win=0))
+                    x = out4
             else:
                 x = self.stages[i](x)
         x = self.norm(x)
