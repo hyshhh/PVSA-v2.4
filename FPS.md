@@ -34,9 +34,10 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth  \
   --cfg-options model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=false \
-  --input-size 224 224 \
+  --input-size 256 256 \
+  --cuda-graph \
   --cudnn-benchmark \
-  --cuda-graph
+  --batch-size 1
 ```
 
 ## 4. 复杂度统计

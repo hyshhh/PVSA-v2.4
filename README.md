@@ -54,12 +54,13 @@ export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/test.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth  \
-  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/vis_results/2 \
+  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/vis_results/3 \
   --cfg-options model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=false \
   --input-size 224 224 \
   --cudnn-benchmark \
   --cuda-graph
+  
 ```
 
 - 首次推理会打印 `CUDA Graph: 捕获完成`（含预热，稍慢），之后每张图重放。
