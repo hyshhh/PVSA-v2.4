@@ -4,6 +4,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 from torch.nn.utils.fusion import fuse_conv_bn_eval
 from .bi_topp_vote import VTFormer
+from ..utils import top_p_bra as _tpb
 from ..utils.topp_flash_kernel import _load_cuda_extension
 from timm.models.layers import LayerNorm2d
 from mmengine.runner import load_checkpoint
@@ -154,12 +155,17 @@ class BiFormer_fusion(VTFormer):
         cnn_features = []
         fused_features = []
 
+        # 图级 debug 计时开关：由 backbone.topp_flash_debug 控制，
+        # 与 ToppAttention 内采样共用；每图末尾统一结算（每 ROUND 张打印一次）。
+        _tpb._STAGE_DEBUG_ACTIVE = bool(getattr(self, 'topp_flash_debug', False))
+
         # ── CNN 分支全零时：纯 Transformer 路径，跳过 CNN/FAM/Fusion ──
         if getattr(self, '_cnn_disabled', False):
             for i in range(4):
                 x = self.downsample_layers[i](x)
                 x = self.stages[i](x)
                 out.append(x)
+            _tpb._finalize_stage_round()
             return out
 
         for i in range(4):
@@ -167,7 +173,28 @@ class BiFormer_fusion(VTFormer):
                 self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_xinput.png', vis_out_size, vis_reduce)
             cnn_out = self.downsample_layers2[i](cnn_out)
             x = self.downsample_layers[i](x)
-            x = self.stages[i](x)
+            if i == 3 and getattr(self, 'topp_flash_debug', False):
+                # S4 是 plain Attention（不走 ToppAttention），单独计时累计，
+                # 与 S1..S3 共用图级结算，凑成 S1..S4 四行。
+                _dim4 = self.embed_dim[3]
+                with torch.no_grad():
+                    out4, elapsed4 = _tpb._time_cuda_stage(
+                        _tpb._STAGE_DEBUG_ACTIVE, x, lambda: self.stages[i](x))
+                if elapsed4 is not None:
+                    _tpb.add_stage_round_entry(_dim4, 'attn', elapsed4)
+                    _tpb._STAGE_ROUND_INFO.setdefault(_dim4, dict(
+                        path='plain_attention',
+                        x_shape=tuple(x.shape),
+                        q_shape=tuple(x.shape),
+                        kv_shape=tuple(x.shape),
+                        route_shape=(),
+                        num_heads=0,
+                        qk_dim=_dim4,
+                        dim=_dim4,
+                        n_win=0))
+                x = out4
+            else:
+                x = self.stages[i](x)
             if vis_enabled and (not vis_once or not getattr(self, '_feature_vis_saved', False)):
                 self._save_feature_channel_as_image(x, f'{vis_dir}/stage{i}_before_FAM_x.png', vis_out_size, vis_reduce)
                 self._save_feature_channel_as_image(cnn_out, f'{vis_dir}/stage{i}_before_FAM_cnn.png', vis_out_size, vis_reduce)
@@ -250,6 +277,8 @@ class BiFormer_fusion(VTFormer):
 
         if vis_enabled:
             self._feature_vis_saved = True
+        # 每图末尾统一结算：满 ROUND 张图打印 S1..S4 各一行
+        _tpb._finalize_stage_round()
         return tuple(out)
 
     def _save_feature_channel_as_image(
