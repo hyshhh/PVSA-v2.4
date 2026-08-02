@@ -21,9 +21,9 @@ from .topp_flash_kernel import (can_run_topp_route_cuda,
 DEFAULT_ATTN_VIS_CONFIG = dict(enabled=False)
 _TOPP_FLASH_STAGE_LOGGED = set()
 _TOPP_FLASH_STAGE_PROFILED = set()
-# debug 阶段耗时：每个 profile_key 采样 N 次取平均（而不是只测第一次）
+# debug 阶段耗时：每 STAGE_PROFILE_N 次采样结算一次平均（默认 100 次）。
 # 增大 N 更稳定，减小 N 更快。可用环境变量覆盖。
-STAGE_PROFILE_N = int(os.getenv('PVSA_STAGE_PROFILE_N', '20'))
+STAGE_PROFILE_N = int(os.getenv('PVSA_STAGE_PROFILE_N', '100'))
 # 每个 profile_key 的采样状态：{key: {stage: 累计ms}} 与计数
 _STAGE_TIMING_SUMS: Dict = {}
 _STAGE_TIMING_COUNT: Dict = {}
@@ -62,7 +62,12 @@ def _normalize_attn_vis_config(attn_vis_config: Optional[Dict]) -> Dict:
 
 
 def _time_cuda_stage(enabled: bool, tensor: Tensor, fn):
+    # 处于 CUDA Graph 捕获流时禁止 Event.synchronize()，直接跳过计时，
+    # 否则会报 "operation not permitted on an event last recorded in a
+    # capturing stream"。用 torch.cuda.is_current_stream_capturing() 检测。
     if not enabled or not torch.cuda.is_available() or not tensor.is_cuda:
+        return fn(), None
+    if torch.cuda.is_current_stream_capturing():
         return fn(), None
     with torch.cuda.device(tensor.device):
         start = torch.cuda.Event(enable_timing=True)

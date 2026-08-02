@@ -313,9 +313,14 @@ def _log_topp_route_debug(query: Tensor, topk: int, p: float,
 def _maybe_time_debug(debug: bool, debug_key: Optional[tuple],
                       debug_path: Optional[str], timing_tensor: Tensor,
                       runner):
+    # CUDA Graph 捕获流内禁止 Event.synchronize()，直接执行不计时，
+    # 否则报 "operation not permitted on an event last recorded in a
+    # capturing stream"。
     if not debug or debug_key is None:
         return runner()
     if not torch.cuda.is_available() or not timing_tensor.is_cuda:
+        return runner()
+    if torch.cuda.is_current_stream_capturing():
         return runner()
     if debug_path in ('cuda_specialized', 'cuda_route'):
         _load_cuda_extension()
