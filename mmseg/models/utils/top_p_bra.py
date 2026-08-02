@@ -25,6 +25,9 @@ _TOPP_FLASH_STAGE_PROFILED = set()
 # 每 ROUND_PROFILE_N 张图结算一次并打印，S1..S4 每个 stage 一行。
 # 同 stage 所有 block 的耗时滚动累计，结算时除以采样次数得平均。
 ROUND_PROFILE_N = int(os.getenv('PVSA_ROUND_PROFILE_N', '100'))
+# 整 block 单次计时实验：=1 时用一对 CUDA Event 包住整个 PVSA block
+# （qkv→wo）测干净的总耗时，累进 'BLOCK_TOTAL' 列，与分阶段计时对比。
+BLOCK_TOTAL_ONLY = int(os.getenv('PVSA_BLOCK_TOTAL_ONLY', '0')) == 1
 _STAGE_ROUND_COUNT = 0                            # 当前窗口内已处理的图数
 _STAGE_ROUND_SUMS: Dict[int, Dict[str, float]] = {}   # dim -> {子阶段: ms累计}
 _STAGE_ROUND_SAMPLE: Dict[int, Dict[str, int]] = {}   # dim -> {子阶段: 采样次数}
@@ -617,7 +620,7 @@ class ToppAttention(nn.Module):
         k_route = 0.5 * (k.mean([2, 3]) + k.amax(dim=(2, 3)))
         return q_route, k_route
 
-    def forward(self, x, GA, ret_attn_mask=False):
+    def _forward_impl(self, x, GA, ret_attn_mask=False):
         """
         x: NHWC tensor
 
@@ -864,3 +867,31 @@ class ToppAttention(nn.Module):
             return out, r_weight, r_idx, attn_weight
         else:
             return out
+
+    def forward(self, x, GA, ret_attn_mask=False):
+        """整 block 单次计时实验（PVSA_BLOCK_TOTAL_ONLY=1 时启用）。
+
+        默认行为与 _forward_impl 完全一致。开启实验时，用一对 CUDA Event
+        包住整个 PVSA block（qkv→wo），只同步一次，得到干净的整 block GPU
+        耗时，累进 'BLOCK_TOTAL' 列（与子阶段同表结算输出），用于对比
+        分阶段计时（各段插事件+同步）是否高估了真实耗时。
+        """
+        if not BLOCK_TOTAL_ONLY or not torch.cuda.is_available() or x is None:
+            return self._forward_impl(x, GA, ret_attn_mask)
+        if not x.is_cuda or not self.topp_flash_debug or not _STAGE_DEBUG_ACTIVE:
+            return self._forward_impl(x, GA, ret_attn_mask)
+        if torch.cuda.is_current_stream_capturing():
+            return self._forward_impl(x, GA, ret_attn_mask)
+        with torch.no_grad():
+            with torch.cuda.device(x.device):
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                out = self._forward_impl(x, GA, ret_attn_mask)
+                end.record()
+                end.synchronize()
+                elapsed = start.elapsed_time(end)
+        add_stage_round_entry(self.dim, 'BLOCK_TOTAL', elapsed)
+        if ret_attn_mask:
+            return out
+        return out
