@@ -63,6 +63,35 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
   --cfg-options model.backbone.topp_flash_backend=cuda \
   --cudnn-benchmark --batch-size 4
 ```
+## 输入尺寸参数 `--input-size H W`
+推理时直接通过命令行调整输入分辨率，无需改配置文件。
+
+### 用法
+```bash
+# 推理前指定 512x512（H=512, W=512）
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth \
+  --input-size 512 512
+
+# 保存分割结果时同样支持（tools/test.py）
+CUDA_VISIBLE_DEVICES=0 python tools/test.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth \
+  --input-size 1024 1024 --show-dir vis_results/
+```
+
+### 作用范围
+- `test_pipeline` 中的 `Resize` 被覆盖为目标尺寸（`scale=(W, H)`）
+- `data_preprocessor.size` 同步更新，避免输入被 padding 回旧尺寸
+- `RandomCrop` 的 `crop_size` 一并同步（如需裁剪）
+
+### 注意事项
+- **H/W 顺序**：`--input-size H W`，内部转成 mmseg 的 `(W, H)` 约定
+- **n_win=7 整除性**：模型窗口路由要求尺寸能被 7 整除（如 224/256/512/1024），否则 attention 的 padding 路径生效
+- **CUDA 核约束**：`topp_flash_backend=cuda` 要求 H、W 能被 `n_win` 整除（`_can_use_specialized_kernel` 检查），不满足会自动回退 torch 路径（不影响正确性，只影响速度）
+- 输入尺寸变化会改变各 stage 特征尺寸，**推理速度随之变化**（尺寸越大越慢）
+
 ## 正确性说明（自定义核 vs 原始路径）
 - 自定义 CUDA 核的 `use_route_weight` 自动跟随配置的 `soft_routing`：
   `soft_routing=False` 时核内不乘 route_weight，与原始路径 KVGather 行为一致。
