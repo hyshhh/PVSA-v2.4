@@ -56,6 +56,11 @@ def parse_args():
         default=None,
         help='override test input resolution, e.g. --input-size 512 512. '
         'Also updates data_preprocessor size and Resize pipeline.')
+    parser.add_argument(
+        '--raw',
+        action='store_true',
+        help='skip mmseg predict post-processing, measure pure model '
+        'forward (backbone + decode head) only.')
     args = parser.parse_args()
     return args
 
@@ -173,7 +178,11 @@ def main():
             start_time = time.perf_counter()
 
             with torch.no_grad():
-                model(inputs, data_samples, mode='predict')
+                if args.raw:
+                    # 纯模型 forward（backbone + decode head），跳过 predict 后处理
+                    model(inputs, data_samples, mode='tensor')
+                else:
+                    model(inputs, data_samples, mode='predict')
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
