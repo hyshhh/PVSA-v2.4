@@ -165,6 +165,9 @@ def main():
             data = model.data_preprocessor(data, False)
             inputs = data['inputs']
             data_samples = data['data_samples']
+            # 诊断：打印第一张真实输入张量的形状，确凿验证 --input-size 是否生效
+            if i == 0 and isinstance(inputs, torch.Tensor):
+                print(f'[diag] 实际输入 tensor shape = {tuple(inputs.shape)}')
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             start_time = time.perf_counter()
