@@ -645,6 +645,8 @@ class ToppAttention(nn.Module):
         Return:
             NHWC tensor
         """
+        # block 模式需要跨调用递增全局 block 序号
+        global _STAGE_BLOCK_INDEX
         # NOTE: use padding for semantic segmentation
         if self.auto_pad:
             N, H_in, W_in, C = x.size()
