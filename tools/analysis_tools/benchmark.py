@@ -265,6 +265,11 @@ def main():
                     seg_logits = model.decode_head.predict_by_feat(
                         graph_output, metas)
                     model.postprocess_result(seg_logits, data_samples)
+                    # 正确性验证：graph_output 应随输入变化（非静态）
+                    if i % 100 == 0:
+                        _v = float(graph_output.detach().abs().sum().item())
+                        print(f'[graph] i={i} output_sum={_v:.3f} '
+                              f'input_mean={float(inputs.float().mean().item()):.3f}')
                 else:
                     model(inputs, data_samples, mode='predict')
 
