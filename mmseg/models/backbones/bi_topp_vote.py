@@ -15,6 +15,7 @@ from timm.models.vision_transformer import _cfg
 from ..utils.common import Attention, AttentionLePE, DWConv
 # from ..utils.bra_legacy import BiLevelRoutingAttention
 from ..utils.bra_legacy_hys_v4 import BiLevelRoutingAttention
+from ..utils import top_p_bra as _tpb
 from ..utils.top_p_bra import ToppAttention
 from mmseg.registry import MODELS
 
@@ -890,11 +891,37 @@ class VTFormer(nn.Module):
         self._inference_fused = True
 
     def forward_features(self, x):
+        # 图级 debug 计时开关：由 backbone.topp_flash_debug 控制，
+        # 与 ToppAttention 内采样共用；每图末尾统一结算（每 ROUND 张打印一次）。
+        _tpb._STAGE_DEBUG_ACTIVE = bool(self.topp_flash_debug)
         for i in range(4):
             x = self.downsample_layers[i](x)  # res = (56, 28, 14, 7), wins = (64, 16, 4, 1)
-            x = self.stages[i](x)
+            if i == 3 and self.topp_flash_debug:
+                # S4 是 plain Attention（不走 ToppAttention），单独计时累计，
+                # 与 S1..S3 共用图级结算，凑成 S1..S4 四行。
+                _dim4 = self.embed_dim[3]
+                with torch.no_grad():
+                    out4, elapsed4 = _tpb._time_cuda_stage(
+                        _tpb._STAGE_DEBUG_ACTIVE, x, lambda: self.stages[i](x))
+                if elapsed4 is not None:
+                    _tpb.add_stage_round_entry(_dim4, 'attn', elapsed4)
+                    _tpb._STAGE_ROUND_INFO.setdefault(_dim4, dict(
+                        path='plain_attention',
+                        x_shape=tuple(x.shape),
+                        q_shape=tuple(x.shape),
+                        kv_shape=tuple(x.shape),
+                        route_shape=(),
+                        num_heads=0,
+                        qk_dim=_dim4,
+                        dim=_dim4,
+                        n_win=0))
+                x = out4
+            else:
+                x = self.stages[i](x)
         x = self.norm(x)
         x = self.pre_logits(x)
+        # 每图末尾统一结算：满 ROUND 张图打印 S1..S4 各一行
+        _tpb._finalize_stage_round()
         return x
 
     def forward(self, x):
