@@ -160,6 +160,18 @@ class _CudaGraphPredictWrapper(torch.nn.Module):
     def device(self):
         return next(self.model.parameters()).device
 
+    def test_step(self, data):
+        """复刻 mmengine BaseModel.test_step：data_preprocessor → predict。
+
+        data_preprocessor 返回 dict(keys=('inputs','data_samples'))，
+        然后走 CUDA Graph 重放的 predict 路径。
+        """
+        data = self.model.data_preprocessor(data, False)
+        return self._predict(data['inputs'], data['data_samples'])
+
+    def val_step(self, data):
+        return self.test_step(data)
+
     def _ensure_captured(self, inputs, data_samples):
         if self._captured:
             return
