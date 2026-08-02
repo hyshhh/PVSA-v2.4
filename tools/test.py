@@ -123,19 +123,42 @@ def trigger_visualization_hook(cfg, args):
     return cfg
 
 
-class _CudaGraphPredictWrapper:
+class _CudaGraphPredictWrapper(torch.nn.Module):
     """用 CUDA Graph 重放替代 predict 的 GPU forward。
 
     第一次调用时捕获 model._forward 成图，之后每次 replay；图外补
     predict_by_feat(resize) + postprocess_result，与 predict 语义一致。
+    内部 model 作为子模块注册，显式转发 nn.Module 关键接口，保证
+    mmengine runner 依赖的 eval()/train()/state_dict() 等可用。
     """
 
     def __init__(self, model):
+        super().__init__()
         self.model = model
         self._graph = None
         self._graph_input = None
         self._graph_output = None
         self._captured = False
+
+    # ── 转发 nn.Module 关键接口到内部 model ──
+    def eval(self, *args, **kwargs):
+        return self.model.eval(*args, **kwargs)
+
+    def train(self, *args, **kwargs):
+        return self.model.train(*args, **kwargs)
+
+    def to(self, *args, **kwargs):
+        return self.model.to(*args, **kwargs)
+
+    def cuda(self, *args, **kwargs):
+        return self.model.cuda(*args, **kwargs)
+
+    def state_dict(self, *args, **kwargs):
+        return self.model.state_dict(*args, **kwargs)
+
+    @property
+    def device(self):
+        return next(self.model.parameters()).device
 
     def _ensure_captured(self, inputs, data_samples):
         if self._captured:
