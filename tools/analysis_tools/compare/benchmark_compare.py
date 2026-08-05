@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 import torch
 from mmengine import Config
+from mmengine.config import DictAction
 from mmengine.runner import load_checkpoint
 from mmseg.registry import MODELS
 from mmseg.utils import register_all_modules
@@ -48,6 +49,11 @@ def parse_args():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default=None, help="保存结果的 JSON 路径")
     parser.add_argument("--cudnn-benchmark", action="store_true")
+    parser.add_argument(
+        "--cfg-options",
+        nargs="+",
+        action=DictAction,
+        help="覆盖配置中的键值，例如 model.backbone.topp_flash_backend=cuda")
     return parser.parse_args()
 
 
@@ -244,6 +250,8 @@ def main():
         torch.backends.cudnn.benchmark = bool(args.cudnn_benchmark)
     register_all_modules(init_default_scope=True)
     cfg = Config.fromfile(args.config)
+    if args.cfg_options is not None:
+        cfg.merge_from_dict(args.cfg_options)
     model = _build_model(cfg, args.checkpoint, device)
     height, width = args.input_size
     inputs = torch.randn(args.batch_size, 3, height, width, device=device)

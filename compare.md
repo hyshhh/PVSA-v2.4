@@ -1,9 +1,10 @@
 # 对比实验说明
 
-本目录按照 `plan.md` 单独增加了九组对比实验：
+本目录按照 `plan.md` 单独增加了十组对比实验：
 
 | 模型 | 版本 | 注意力类型 | 配置文件 | 独立测速脚本 |
 |---|---|---|---|---|
+| PVSA | 原始模型 | Top-P 路由注意力 | `configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py` | `tools/analysis_tools/compare/benchmark_pvsa.py` |
 | BiFormer | T | S1-S3 为 BRA，S4 为全局注意力 | `configs-h/compare/biformer_t-compare_gqy-256x256.py` | `tools/analysis_tools/compare/benchmark_biformer_t.py` |
 | BiFormer | S | S1-S3 为 BRA，S4 为全局注意力 | `configs-h/compare/biformer_s-compare_gqy-256x256.py` | `tools/analysis_tools/compare/benchmark_biformer_s.py` |
 | BiFormer | B | S1-S3 为 BRA，S4 为全局注意力 | `configs-h/compare/biformer_b-compare_gqy-256x256.py` | `tools/analysis_tools/compare/benchmark_biformer_b.py` |
@@ -29,6 +30,15 @@ export CXX=/usr/bin/g++-11
 ```
 
 
+
+## 二、统一实验口径
+
+- PVSA 和九个对比模型均使用固定输入尺寸测速。
+- 默认批大小为一，预热三十次，正式测速二百次。
+- 普通前向模式和 CUDA Graph 模式分别记录吞吐率。
+- 阶段耗时统一按单张图片的平均注意力耗时统计。
+- 开启 `--debug` 时，程序会额外进行普通前向阶段统计；CUDA Graph 本身不插入阶段事件计时。
+- PVSA 公平基准使用前向钩子统计四个阶段的 `PA` 模块，原始 PVSA 测速入口仍然保留。
 
 ## 三、使用 CUDA Graph 测试统一对比脚本
 
@@ -82,7 +92,100 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_biformer_t.
 
 其他模型只需要将脚本、配置文件、权重目录和输出文件名替换为对应版本即可。
 
-## 四、BiFormer-T
+## 四、PVSA 公平基准测速
+
+原始 PVSA 方法现在增加了统一公平基准入口：
+
+```text
+tools/analysis_tools/compare/benchmark_pvsa.py
+```
+
+该入口与其他对比模型保持相同测速口径：
+
+- 固定输入尺寸；
+- 相同批大小；
+- 相同预热次数；
+- 相同正式迭代次数；
+- 相同显卡同步方式；
+- 相同 `S1` 到 `S4` 阶段注意力统计方式；
+- 支持 CUDA Graph 吞吐率测试。
+
+PVSA 公平基准计时通过前向钩子统计原始 PVSA 四个阶段中的 `PA` 模块，不修改原始 PVSA 主干和原始测速脚本。
+
+### PVSA 普通前向公平测速
+
+```bash
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
+
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth \
+  --cfg-options \
+  model.backbone.topp_flash_backend=None \
+  model.backbone.topp_flash_debug=0 \
+  --input-size 256 256 \
+  --cudnn-benchmark \
+  --batch-size 1 \
+  --warmup 30 \
+  --iters 200 \
+  --debug \
+  --debug-interval 100 \
+  --output work_dirs/compare/pvsa/fps_attention_eager.json
+```
+
+### PVSA CUDA Graph 公平测速
+
+如果要和其他对比模型一样使用 CUDA Graph，需要启用 PVSA 的自定义 CUDA 后端：
+
+```bash
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
+
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth \
+  --cfg-options \
+  model.backbone.topp_flash_backend=cuda \
+  model.backbone.topp_flash_debug=0 \
+  --input-size 256 256 \
+  --cuda-graph \
+  --cudnn-benchmark \
+  --batch-size 1 \
+  --warmup 30 \
+  --iters 200 \
+  --debug \
+  --debug-interval 100 \
+  --output work_dirs/compare/pvsa/fps_attention_cuda_graph.json
+```
+
+其中 CUDA Graph 模式下：
+
+- `fps` 是图捕获与重放得到的吞吐率；
+- `attention_reports` 是随后普通前向阶段统计得到的 `S1` 到 `S4` 注意力耗时；
+- 若自定义 CUDA 扩展没有编译成功，先使用普通前向公平测速，或按照原始 PVSA 的 CUDA 扩展安装方式处理。
+
+### 原始 PVSA 测试方法保留
+
+原始测试入口没有删除或替换，仍然可以继续使用：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth \
+  --cfg-options model.backbone.topp_flash_backend=cuda \
+  model.backbone.topp_flash_debug=false \
+  --input-size 256 256 \
+  --cuda-graph \
+  --cudnn-benchmark \
+  --batch-size 1
+```
+
+原始方法和统一公平基准方法的区别是：原始入口沿用 PVSA 原有数据读取、预热、计时和调试逻辑；公平基准入口使用固定随机输入、统一预热次数、统一迭代次数以及统一的阶段钩子计时。
+
+## 五、BiFormer-T
 
 ### 训练命令
 
@@ -106,7 +209,7 @@ python tools/analysis_tools/compare/benchmark_biformer_t.py \
   --cudnn-benchmark \
   --output work_dirs/compare/biformer_t/fps_attention.json
 ```
-## 五、BiFormer-S
+## 六、BiFormer-S
 
 ### 训练命令
 ```bash
@@ -131,7 +234,7 @@ python tools/analysis_tools/compare/benchmark_biformer_s.py \
   --output work_dirs/compare/biformer_s/fps_attention.json
 ```
 
-## 六、BiFormer-B
+## 七、BiFormer-B
 
 ### 训练命令
 
@@ -157,7 +260,7 @@ python tools/analysis_tools/compare/benchmark_biformer_b.py \
   --output work_dirs/compare/biformer_b/fps_attention.json
 ```
 
-## 七、Swin-T
+## 八、Swin-T
 
 ### 训练命令
 
@@ -183,7 +286,7 @@ python tools/analysis_tools/compare/benchmark_swin_t.py \
   --output work_dirs/compare/swin_t/fps_attention.json
 ```
 
-## 八、Swin-S
+## 九、Swin-S
 
 ### 训练命令
 
@@ -209,7 +312,7 @@ python tools/analysis_tools/compare/benchmark_swin_s.py \
   --output work_dirs/compare/swin_s/fps_attention.json
 ```
 
-## 九、Swin-B
+## 十、Swin-B
 
 ### 训练命令
 
@@ -235,7 +338,7 @@ python tools/analysis_tools/compare/benchmark_swin_b.py \
   --output work_dirs/compare/swin_b/fps_attention.json
 ```
 
-## 十、ViT-T
+## 十一、ViT-T
 
 ### 训练命令
 
@@ -261,7 +364,7 @@ python tools/analysis_tools/compare/benchmark_vit_t.py \
   --output work_dirs/compare/vit_t/fps_attention.json
 ```
 
-## 十一、ViT-S
+## 十二、ViT-S
 
 ### 训练命令
 
@@ -287,7 +390,7 @@ python tools/analysis_tools/compare/benchmark_vit_s.py \
   --output work_dirs/compare/vit_s/fps_attention.json
 ```
 
-## 十二、ViT-B
+## 十三、ViT-B
 
 ### 训练命令
 
@@ -313,9 +416,10 @@ python tools/analysis_tools/compare/benchmark_vit_b.py \
   --output work_dirs/compare/vit_b/fps_attention.json
 ```
 
-## 十三、输出示例与结果记录
+## 十四、输出示例与结果记录
 | 模型 | FPS | S1 注意力毫秒 | S2 注意力毫秒 | S3 注意力毫秒 | S4 注意力毫秒 |
 |---|---:|---:|---:|---:|---:|
+| PVSA |  |  |  |  |  |
 | BiFormer-T |  |  |  |  |  |
 | BiFormer-S |  |  |  |  |  |
 | BiFormer-B |  |  |  |  |  |
@@ -327,3 +431,12 @@ python tools/analysis_tools/compare/benchmark_vit_b.py \
 | ViT-B |  |  |  |  |  |
 
 
+
+## 十五、文件归档
+
+- 原始 PVSA 测速：`tools/analysis_tools/benchmark.py`
+- PVSA 公平基准测速：`tools/analysis_tools/compare/benchmark_pvsa.py`
+- PVSA 公平计时器：`tools/analysis_tools/compare/pvsa_fair_timer.py`
+- 统一对比测速入口：`tools/analysis_tools/compare/benchmark_compare.py`
+- 对比模型代码：`mmseg/models/backbones/compare/`
+- 对比实验配置：`configs-h/compare/`
