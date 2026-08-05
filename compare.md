@@ -30,7 +30,59 @@ export CXX=/usr/bin/g++-11
 
 
 
-## 三、BiFormer-T
+## 三、使用 CUDA Graph 测试统一对比脚本
+
+统一测速脚本现在支持 `--cuda-graph`。它会使用固定输入尺寸捕获完整的主干和解码头前向，并通过重放图统计吞吐率。
+
+如果同时添加 `--debug`，脚本会分成两个阶段：
+
+1. 使用 CUDA Graph 测量整体吞吐率；
+2. 关闭 CUDA Graph，使用普通前向单独统计 `S1` 到 `S4` 阶段注意力耗时。
+
+因此最终结果中的 `fps` 是 CUDA Graph 吞吐率，而 `attention_reports` 来自普通前向调试阶段。这样既能得到图重放后的吞吐率，也能保留阶段耗时统计。
+
+### BiFormer-T 的 CUDA Graph 命令
+
+```bash
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
+
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_biformer_t.py \
+  configs-h/compare/biformer_t-compare_gqy-256x256.py \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/compare/biformer_t/epoch_80.pth \
+  --input-size 256 256 \
+  --cuda-graph \
+  --cudnn-benchmark \
+  --batch-size 1 \
+  --warmup 30 \
+  --iters 200 \
+  --debug \
+  --debug-interval 100 \
+  --output work_dirs/compare/biformer_t/fps_attention_cuda_graph.json
+```
+
+如果只测试 CUDA Graph 的纯吞吐率，可以删除：
+
+```bash
+--debug \
+--debug-interval 100
+```
+
+此时不会执行第二阶段的注意力耗时统计。
+
+注意事项：
+
+- 必须使用固定输入尺寸；
+- 建议批大小固定为一；
+- 必须在显卡环境中运行；
+- CUDA Graph 捕获期间不会执行阶段事件计时；
+- 如果模型结构或输入尺寸发生变化，需要重新启动脚本；
+- `--cuda-graph` 不需要设置 `model.backbone.topp_flash_backend=cuda`，因为这里使用的是对比实验专用主干。
+
+其他模型只需要将脚本、配置文件、权重目录和输出文件名替换为对应版本即可。
+
+## 四、BiFormer-T
 
 ### 训练命令
 
@@ -54,7 +106,7 @@ python tools/analysis_tools/compare/benchmark_biformer_t.py \
   --cudnn-benchmark \
   --output work_dirs/compare/biformer_t/fps_attention.json
 ```
-## 四、BiFormer-S
+## 五、BiFormer-S
 
 ### 训练命令
 ```bash
@@ -79,7 +131,7 @@ python tools/analysis_tools/compare/benchmark_biformer_s.py \
   --output work_dirs/compare/biformer_s/fps_attention.json
 ```
 
-## 五、BiFormer-B
+## 六、BiFormer-B
 
 ### 训练命令
 
@@ -105,7 +157,7 @@ python tools/analysis_tools/compare/benchmark_biformer_b.py \
   --output work_dirs/compare/biformer_b/fps_attention.json
 ```
 
-## 六、Swin-T
+## 七、Swin-T
 
 ### 训练命令
 
@@ -131,7 +183,7 @@ python tools/analysis_tools/compare/benchmark_swin_t.py \
   --output work_dirs/compare/swin_t/fps_attention.json
 ```
 
-## 七、Swin-S
+## 八、Swin-S
 
 ### 训练命令
 
@@ -157,7 +209,7 @@ python tools/analysis_tools/compare/benchmark_swin_s.py \
   --output work_dirs/compare/swin_s/fps_attention.json
 ```
 
-## 八、Swin-B
+## 九、Swin-B
 
 ### 训练命令
 
@@ -183,7 +235,7 @@ python tools/analysis_tools/compare/benchmark_swin_b.py \
   --output work_dirs/compare/swin_b/fps_attention.json
 ```
 
-## 九、ViT-T
+## 十、ViT-T
 
 ### 训练命令
 
@@ -209,7 +261,7 @@ python tools/analysis_tools/compare/benchmark_vit_t.py \
   --output work_dirs/compare/vit_t/fps_attention.json
 ```
 
-## 十、ViT-S
+## 十一、ViT-S
 
 ### 训练命令
 
@@ -235,7 +287,7 @@ python tools/analysis_tools/compare/benchmark_vit_s.py \
   --output work_dirs/compare/vit_s/fps_attention.json
 ```
 
-## 十一、ViT-B
+## 十二、ViT-B
 
 ### 训练命令
 
@@ -261,7 +313,7 @@ python tools/analysis_tools/compare/benchmark_vit_b.py \
   --output work_dirs/compare/vit_b/fps_attention.json
 ```
 
-## 十二、输出示例与结果记录
+## 十三、输出示例与结果记录
 | 模型 | FPS | S1 注意力毫秒 | S2 注意力毫秒 | S3 注意力毫秒 | S4 注意力毫秒 |
 |---|---:|---:|---:|---:|---:|
 | BiFormer-T |  |  |  |  |  |

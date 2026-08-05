@@ -39,6 +39,12 @@ def parse_args():
     parser.add_argument("--repeat-times", type=int, default=1)
     parser.add_argument("--debug", action="store_true", help="输出 S1-S4 阶段耗时")
     parser.add_argument("--debug-interval", type=int, default=100)
+    parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help=(
+            "使用固定输入捕获并重放 CUDA Graph；若同时开启 --debug，"
+            "先用 CUDA Graph 测吞吐，再用普通前向统计阶段耗时"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default=None, help="保存结果的 JSON 路径")
     parser.add_argument("--cudnn-benchmark", action="store_true")
@@ -91,7 +97,16 @@ def _measure_once(model, inputs: torch.Tensor, device: torch.device) -> float:
     return time.perf_counter() - start
 
 
-def _run_one(model, inputs, device, args, run_index: int) -> Dict:
+def _attention_reports(model):
+    backbone = getattr(model, "backbone", model)
+    if hasattr(backbone, "compare_timer"):
+        return backbone.compare_timer.reports
+    return []
+
+
+def _run_eager(model, inputs, device, args, run_index: int,
+               report_prefix="") -> Dict:
+    """普通前向测速，可选同步统计 S1-S4 阶段耗时。"""
     # 预热阶段不计入阶段耗时，避免把首次算子选择和缓存建立计入结果。
     _set_timer(model, False, args.debug_interval)
     for _ in range(max(args.warmup, 0)):
@@ -105,37 +120,126 @@ def _run_one(model, inputs, device, args, run_index: int) -> Dict:
         elapsed.append(_measure_once(model, inputs, device))
         if (index + 1) % max(args.debug_interval, 1) == 0:
             fps = args.batch_size * (index + 1) / sum(elapsed)
-            print(f"[COMPARE-FPS] run={run_index} iter={index + 1} "
-                  f"fps={fps:.4f} img/s")
+            prefix = f"{report_prefix} " if report_prefix else ""
+            print(f"[COMPARE-FPS] {prefix}run={run_index} "
+                  f"iter={index + 1} fps={fps:.4f} img/s")
     _flush_timer(model)
-    backbone = getattr(model, "backbone", model)
-    attention_reports = (
-        backbone.compare_timer.reports
-        if hasattr(backbone, "compare_timer") else [])
+    attention_reports = _attention_reports(model)
 
     total_seconds = sum(elapsed)
     fps = args.batch_size * len(elapsed) / total_seconds
     latency_ms = total_seconds / len(elapsed) * 1000.0
-    result = dict(
+    prefix = f"{report_prefix} " if report_prefix else ""
+    print(f"[COMPARE-FPS] {prefix}run={run_index} "
+          f"overall_fps={fps:.4f} img/s latency={latency_ms:.4f}ms/batch")
+    return dict(
         run=run_index,
         fps=fps,
         latency_ms_per_batch=latency_ms,
         latency_ms_per_image=latency_ms / max(args.batch_size, 1),
         images=args.batch_size * len(elapsed),
-        attention_reports=attention_reports)
-    print(f"[COMPARE-FPS] run={run_index} overall_fps={fps:.4f} img/s "
-          f"latency={latency_ms:.4f}ms/batch")
-    return result
+        attention_reports=attention_reports,
+        mode="eager")
 
+
+class _CudaGraphForward:
+    """固定输入尺寸的完整分割网络 CUDA Graph 捕获器。"""
+
+    def __init__(self, model, inputs: torch.Tensor, warmup: int,
+                 device: torch.device) -> None:
+        if device.type != "cuda":
+            raise RuntimeError("CUDA Graph 需要显卡设备")
+        self.model = model
+        self.device = device
+        self.graph_input = inputs.detach().clone()
+        self.graph = torch.cuda.CUDAGraph()
+        self.graph_output = None
+
+        # 捕获前先关闭阶段事件计时；CUDA Graph 捕获期间不能同步计时事件。
+        _set_timer(model, False, 1)
+        with torch.inference_mode():
+            for _ in range(max(int(warmup), 1)):
+                model._forward(self.graph_input, None)
+        torch.cuda.synchronize(device)
+
+        try:
+            with torch.inference_mode():
+                with torch.cuda.graph(self.graph):
+                    self.graph_output = model._forward(self.graph_input, None)
+            torch.cuda.synchronize(device)
+        except Exception as exc:
+            raise RuntimeError(
+                "对比模型 CUDA Graph 捕获失败，请确认输入尺寸固定、模型处于 eval 模式，"
+                "并检查显卡与框架版本是否支持 CUDA Graph。") from exc
+        print("[COMPARE-CUDA-GRAPH] 捕获完成")
+
+    def replay(self, inputs: torch.Tensor) -> None:
+        # 当前测速使用固定随机输入；保留复制逻辑，便于以后接入真实图片批次。
+        if inputs.data_ptr() != self.graph_input.data_ptr():
+            self.graph_input.copy_(inputs)
+        self.graph.replay()
+
+
+def _measure_graph_once(graph_runner: _CudaGraphForward,
+                        inputs: torch.Tensor,
+                        device: torch.device) -> float:
+    torch.cuda.synchronize(device)
+    start = time.perf_counter()
+    graph_runner.replay(inputs)
+    torch.cuda.synchronize(device)
+    return time.perf_counter() - start
+
+
+def _run_cuda_graph(model, inputs, device, args, run_index: int) -> Dict:
+    """使用 CUDA Graph 测量完整主干和解码头前向吞吐。"""
+    graph_runner = _CudaGraphForward(model, inputs, args.warmup, device)
+    elapsed = []
+    for index in range(max(args.iters, 1)):
+        elapsed.append(_measure_graph_once(graph_runner, inputs, device))
+        if (index + 1) % max(args.debug_interval, 1) == 0:
+            fps = args.batch_size * (index + 1) / sum(elapsed)
+            print(f"[COMPARE-CUDA-GRAPH] run={run_index} iter={index + 1} "
+                  f"fps={fps:.4f} img/s")
+    total_seconds = sum(elapsed)
+    fps = args.batch_size * len(elapsed) / total_seconds
+    latency_ms = total_seconds / len(elapsed) * 1000.0
+    print(f"[COMPARE-CUDA-GRAPH] run={run_index} overall_fps={fps:.4f} img/s "
+          f"latency={latency_ms:.4f}ms/batch")
+    return dict(
+        run=run_index,
+        fps=fps,
+        latency_ms_per_batch=latency_ms,
+        latency_ms_per_image=latency_ms / max(args.batch_size, 1),
+        images=args.batch_size * len(elapsed),
+        attention_reports=[],
+        mode="cuda_graph")
+
+
+def _run_one(model, inputs, device, args, run_index: int) -> Dict:
+    if not args.cuda_graph:
+        return _run_eager(model, inputs, device, args, run_index)
+
+    result = _run_cuda_graph(model, inputs, device, args, run_index)
+    if args.debug:
+        print("[COMPARE-ATTN] CUDA Graph 不进行阶段事件计时，开始普通前向阶段统计")
+        debug_result = _run_eager(
+            model, inputs, device, args, run_index, report_prefix="debug")
+        result["attention_reports"] = debug_result["attention_reports"]
+        result["debug_profile"] = debug_result
+    return result
 
 def main():
     args = parse_args()
     if args.batch_size <= 0 or args.iters <= 0:
         raise ValueError("--batch-size 和 --iters 必须为正数")
+    if args.debug_interval <= 0:
+        raise ValueError("--debug-interval 必须为正数")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         print("未检测到显卡，自动切换到 CPU；CPU 结果仅用于功能检查")
         args.device = "cpu"
     device = torch.device(args.device)
+    if args.cuda_graph and device.type != "cuda":
+        raise RuntimeError("--cuda-graph 需要可用的 CUDA 显卡")
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = bool(args.cudnn_benchmark)
     register_all_modules(init_default_scope=True)
@@ -156,6 +260,7 @@ def main():
         input_size=[height, width],
         batch_size=args.batch_size,
         debug=args.debug,
+        cuda_graph=args.cuda_graph,
         runs=runs,
         average_fps=average_fps)
     if args.output:
