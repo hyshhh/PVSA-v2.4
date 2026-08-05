@@ -218,10 +218,14 @@ class _CudaGraphForward:
         print("[COMPARE-CUDA-GRAPH] 捕获完成")
 
     def replay(self, inputs: torch.Tensor) -> None:
-        # 当前测速使用固定随机输入；保留复制逻辑，便于以后接入真实图片批次。
-        if inputs.data_ptr() != self.graph_input.data_ptr():
-            self.graph_input.copy_(inputs)
-        self.graph.replay()
+        # CUDA Graph 捕获阶段使用了 inference_mode；重放也必须处于同一模式，
+        # 否则较新版本的 PyTorch 会把图内静态输出视为 inference tensor，
+        # 并报“Inplace update to inference tensor outside InferenceMode”。
+        with torch.inference_mode():
+            # 当前测速使用固定随机输入；保留复制逻辑，便于以后接入真实图片批次。
+            if inputs.data_ptr() != self.graph_input.data_ptr():
+                self.graph_input.copy_(inputs)
+            self.graph.replay()
 
 
 def _measure_graph_once(graph_runner: _CudaGraphForward,

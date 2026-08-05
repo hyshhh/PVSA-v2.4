@@ -208,6 +208,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_biformer_t.py \
   configs-h/compare/biformer_t-compare_gqy-256x256.py \
   --input-size 224 224 \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
@@ -231,6 +232,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_biformer_s.py \
   configs-h/compare/biformer_s-compare_gqy-256x256.py \
   --input-size 224 224 \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
@@ -256,6 +258,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_biformer_b.py \
   configs-h/compare/biformer_b-compare_gqy-256x256.py \
   --input-size 224 224 \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
@@ -281,6 +284,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_swin_t.py \
   configs-h/compare/swin_t-compare_gqy-256x256.py \
   --input-size 224 224 \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
@@ -306,6 +310,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_swin_s.py \
   configs-h/compare/swin_s-compare_gqy-256x256.py \
   --input-size 224 224 \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
@@ -331,6 +336,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_swin_b.py \
   configs-h/compare/swin_b-compare_gqy-256x256.py \
   --input-size 224 224 \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
@@ -356,6 +362,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_vit_t.py \
   configs-h/compare/vit_t-compare_gqy-256x256.py \
   --input-size 224 224 \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
@@ -381,6 +388,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_vit_s.py \
   configs-h/compare/vit_s-compare_gqy-256x256.py \
   --input-size 224 224 \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
@@ -406,6 +414,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_vit_b.py \
   configs-h/compare/vit_b-compare_gqy-256x256.py \
   --input-size 224 224 \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
