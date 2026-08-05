@@ -40,6 +40,7 @@ export CXX=/usr/bin/g++-11
 - 开启 `--debug` 时，程序会额外进行普通前向阶段统计；CUDA Graph 本身不插入阶段事件计时。
 - PVSA 公平基准使用前向钩子统计四个阶段的 `PA` 模块，原始 PVSA 测速入口仍然保留。
 - 本文件中的公平测速命令不传入训练好的权重，统一使用随机初始化模型；训练命令只用于需要精度结果时的训练流程展示。
+- 统一测速脚本的 `--cuda-graph` 默认值为 `true`，可以写成 `--cuda-graph true` 或 `--cuda-graph false`；需要普通前向测速时必须显式写 `--cuda-graph false`。
 
 ## 三、使用 CUDA Graph 测试统一对比脚本
 
@@ -62,7 +63,7 @@ export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_biformer_t.py \
   configs-h/compare/biformer_t-compare_gqy-256x256.py \
   --input-size 256 256 \
-  --cuda-graph \
+  --cuda-graph true \
   --cudnn-benchmark \
   --batch-size 1 \
   --warmup 30 \
@@ -72,7 +73,19 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_biformer_t.
   --output work_dirs/compare/biformer_t/fps_attention_cuda_graph.json
 ```
 
-如果只测试 CUDA Graph 的纯吞吐率，可以删除：
+如果只测试 CUDA Graph 的纯吞吐率，可以保留默认值，或显式写：
+
+```bash
+--cuda-graph true
+```
+
+如果测试普通前向吞吐率，应显式写：
+
+```bash
+--cuda-graph false
+```
+
+阶段调试参数仍然可以按需删除：
 
 ```bash
 --debug \
@@ -125,6 +138,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
   model.backbone.topp_flash_backend=None \
   model.backbone.topp_flash_debug=0 \
   --input-size 256 256 \
+  --cuda-graph false \
   --cudnn-benchmark \
   --batch-size 1 \
   --warmup 30 \
@@ -149,7 +163,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
   model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=0 \
   --input-size 256 256 \
-  --cuda-graph \
+  --cuda-graph true \
   --cudnn-benchmark \
   --batch-size 1 \
   --warmup 30 \

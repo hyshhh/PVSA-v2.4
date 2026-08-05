@@ -28,6 +28,18 @@ import mmseg.models.backbones.compare  # noqa: F401
 
 
 
+def _str_to_bool(value):
+    """把命令行中的 true/false 转成布尔值。"""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off"):
+        return False
+    raise ValueError("布尔参数只能填写 true 或 false")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="对比模型 FPS 与阶段注意力测速")
     parser.add_argument("config", help="对比实验配置文件")
@@ -42,10 +54,13 @@ def parse_args():
     parser.add_argument("--debug-interval", type=int, default=100)
     parser.add_argument(
         "--cuda-graph",
-        action="store_true",
+        type=_str_to_bool,
+        nargs="?",
+        const=True,
+        default=True,
         help=(
-            "使用固定输入捕获并重放 CUDA Graph；若同时开启 --debug，"
-            "先用 CUDA Graph 测吞吐，再用普通前向统计阶段耗时"))
+            "是否使用固定输入捕获并重放 CUDA Graph，默认 true；"
+            "可显式写 --cuda-graph true 或 --cuda-graph false。"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default=None, help="保存结果的 JSON 路径")
     parser.add_argument("--cudnn-benchmark", action="store_true")
