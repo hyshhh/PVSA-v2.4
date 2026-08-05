@@ -1,6 +1,6 @@
 # 对比实验说明
 
-本目录按照 `plan.md` 单独增加了十组对比实验：
+本目录按照 `plan.md` 单独增加了十组对比实验；公平测速统一不加载训练好的权重：
 
 | 模型 | 版本 | 注意力类型 | 配置文件 | 独立测速脚本 |
 |---|---|---|---|---|
@@ -39,6 +39,7 @@ export CXX=/usr/bin/g++-11
 - 阶段耗时统一按单张图片的平均注意力耗时统计。
 - 开启 `--debug` 时，程序会额外进行普通前向阶段统计；CUDA Graph 本身不插入阶段事件计时。
 - PVSA 公平基准使用前向钩子统计四个阶段的 `PA` 模块，原始 PVSA 测速入口仍然保留。
+- 本文件中的公平测速命令不传入训练好的权重，统一使用随机初始化模型；训练命令只用于需要精度结果时的训练流程展示。
 
 ## 三、使用 CUDA Graph 测试统一对比脚本
 
@@ -60,7 +61,6 @@ export CXX=/usr/bin/g++-11
 
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_biformer_t.py \
   configs-h/compare/biformer_t-compare_gqy-256x256.py \
-  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/compare/biformer_t/epoch_80.pth \
   --input-size 256 256 \
   --cuda-graph \
   --cudnn-benchmark \
@@ -90,7 +90,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_biformer_t.
 - 如果模型结构或输入尺寸发生变化，需要重新启动脚本；
 - `--cuda-graph` 不需要设置 `model.backbone.topp_flash_backend=cuda`，因为这里使用的是对比实验专用主干。
 
-其他模型只需要将脚本、配置文件、权重目录和输出文件名替换为对应版本即可。
+其他模型只需要将脚本、配置文件和输出文件名替换为对应版本即可。
 
 ## 四、PVSA 公平基准测速
 
@@ -121,7 +121,6 @@ export CXX=/usr/bin/g++-11
 
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth \
   --cfg-options \
   model.backbone.topp_flash_backend=None \
   model.backbone.topp_flash_debug=0 \
@@ -146,7 +145,6 @@ export CXX=/usr/bin/g++-11
 
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth \
   --cfg-options \
   model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=0 \
@@ -169,19 +167,13 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
 
 ### 原始 PVSA 测试方法保留
 
-原始测试入口没有删除或替换，仍然可以继续使用：
+原始测试入口没有删除或替换，仍然保留在：
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/benchmark.py \
-  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth \
-  --cfg-options model.backbone.topp_flash_backend=cuda \
-  model.backbone.topp_flash_debug=false \
-  --input-size 256 256 \
-  --cuda-graph \
-  --cudnn-benchmark \
-  --batch-size 1
+```text
+tools/analysis_tools/benchmark.py
 ```
+
+原始入口的 `checkpoint` 参数是必填项，因此原始权重测试命令继续放在 `FPS.md` 中；本文件中的统一公平基准命令均不传入训练好的权重。
 
 原始方法和统一公平基准方法的区别是：原始入口沿用 PVSA 原有数据读取、预热、计时和调试逻辑；公平基准入口使用固定随机输入、统一预热次数、统一迭代次数以及统一的阶段钩子计时。
 
@@ -199,7 +191,6 @@ python tools/train.py \
 ```bash
 python tools/analysis_tools/compare/benchmark_biformer_t.py \
   configs-h/compare/biformer_t-compare_gqy-256x256.py \
-  work_dirs/compare/biformer_t/epoch_80.pth \
   --input-size 224 224 \
   --batch-size 1 \
   --warmup 30 \
@@ -223,7 +214,6 @@ python tools/train.py \
 ```bash
 python tools/analysis_tools/compare/benchmark_biformer_s.py \
   configs-h/compare/biformer_s-compare_gqy-256x256.py \
-  work_dirs/compare/biformer_s/epoch_80.pth \
   --input-size 224 224 \
   --batch-size 1 \
   --warmup 30 \
@@ -249,7 +239,6 @@ python tools/train.py \
 ```bash
 python tools/analysis_tools/compare/benchmark_biformer_b.py \
   configs-h/compare/biformer_b-compare_gqy-256x256.py \
-  work_dirs/compare/biformer_b/epoch_80.pth \
   --input-size 224 224 \
   --batch-size 1 \
   --warmup 30 \
@@ -275,7 +264,6 @@ python tools/train.py \
 ```bash
 python tools/analysis_tools/compare/benchmark_swin_t.py \
   configs-h/compare/swin_t-compare_gqy-256x256.py \
-  work_dirs/compare/swin_t/epoch_80.pth \
   --input-size 224 224 \
   --batch-size 1 \
   --warmup 30 \
@@ -301,7 +289,6 @@ python tools/train.py \
 ```bash
 python tools/analysis_tools/compare/benchmark_swin_s.py \
   configs-h/compare/swin_s-compare_gqy-256x256.py \
-  work_dirs/compare/swin_s/epoch_80.pth \
   --input-size 224 224 \
   --batch-size 1 \
   --warmup 30 \
@@ -327,7 +314,6 @@ python tools/train.py \
 ```bash
 python tools/analysis_tools/compare/benchmark_swin_b.py \
   configs-h/compare/swin_b-compare_gqy-256x256.py \
-  work_dirs/compare/swin_b/epoch_80.pth \
   --input-size 224 224 \
   --batch-size 1 \
   --warmup 30 \
@@ -353,7 +339,6 @@ python tools/train.py \
 ```bash
 python tools/analysis_tools/compare/benchmark_vit_t.py \
   configs-h/compare/vit_t-compare_gqy-256x256.py \
-  work_dirs/compare/vit_t/epoch_80.pth \
   --input-size 224 224 \
   --batch-size 1 \
   --warmup 30 \
@@ -379,7 +364,6 @@ python tools/train.py \
 ```bash
 python tools/analysis_tools/compare/benchmark_vit_s.py \
   configs-h/compare/vit_s-compare_gqy-256x256.py \
-  work_dirs/compare/vit_s/epoch_80.pth \
   --input-size 224 224 \
   --batch-size 1 \
   --warmup 30 \
@@ -405,7 +389,6 @@ python tools/train.py \
 ```bash
 python tools/analysis_tools/compare/benchmark_vit_b.py \
   configs-h/compare/vit_b-compare_gqy-256x256.py \
-  work_dirs/compare/vit_b/epoch_80.pth \
   --input-size 224 224 \
   --batch-size 1 \
   --warmup 30 \
