@@ -4,7 +4,7 @@
 
 | 模型 | 版本 | 注意力类型 | 配置文件 | 独立测速脚本 |
 |---|---|---|---|---|
-| PVSA | 原始模型 | Top-P 路由注意力 | `configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py` | `tools/analysis_tools/compare/benchmark_pvsa.py` |
+| PVSA | 原始模型 | Top-P 路由注意力 | `configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py` | `tools/analysis_tools/compare/benchmark_compare.py` |
 | BiFormer | T | S1-S3 为 BRA，S4 为全局注意力 | `configs-h/compare/biformer_t-compare_gqy-256x256.py` | `tools/analysis_tools/compare/benchmark_biformer_t.py` |
 | BiFormer | S | S1-S3 为 BRA，S4 为全局注意力 | `configs-h/compare/biformer_s-compare_gqy-256x256.py` | `tools/analysis_tools/compare/benchmark_biformer_s.py` |
 | BiFormer | B | S1-S3 为 BRA，S4 为全局注意力 | `configs-h/compare/biformer_b-compare_gqy-256x256.py` | `tools/analysis_tools/compare/benchmark_biformer_b.py` |
@@ -107,11 +107,13 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_biformer_t.
 
 ## 四、PVSA 公平基准测速
 
-原始 PVSA 方法现在增加了统一公平基准入口：
+原始 PVSA 方法现在直接接入统一公平基准入口：
 
 ```text
-tools/analysis_tools/compare/benchmark_pvsa.py
+tools/analysis_tools/compare/benchmark_compare.py
 ```
+
+统一入口会根据配置中的 `model.backbone.type` 自动识别原始 PVSA，并安装 PVSA 专用阶段计时适配器。
 
 该入口与其他对比模型保持相同测速口径：
 
@@ -132,7 +134,7 @@ export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_compare.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options \
   model.backbone.topp_flash_backend=None \
@@ -157,7 +159,7 @@ export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 
-CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
+CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_compare.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options \
   model.backbone.topp_flash_backend=cuda \
@@ -187,7 +189,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
 tools/analysis_tools/benchmark.py
 ```
 
-原始入口的 `checkpoint` 参数是必填项，因此原始权重测试命令继续放在 `FPS.md` 中；本文件中的统一公平基准命令均不传入训练好的权重。
+原始入口的 `checkpoint` 参数是必填项，因此原始权重测试命令继续放在 `FPS.md` 中；本文件中的统一公平基准命令均不传入训练好的权重。旧版 PVSA 公平入口已经备份，但不再作为主推荐入口。
 
 原始方法和统一公平基准方法的区别是：原始入口沿用 PVSA 原有数据读取、预热、计时和调试逻辑；公平基准入口使用固定随机输入、统一预热次数、统一迭代次数以及统一的阶段钩子计时。
 
@@ -432,8 +434,9 @@ python tools/analysis_tools/compare/benchmark_vit_b.py \
 ## 十五、文件归档
 
 - 原始 PVSA 测速：`tools/analysis_tools/benchmark.py`
-- PVSA 公平基准测速：`tools/analysis_tools/compare/benchmark_pvsa.py`
-- PVSA 公平计时器：`tools/analysis_tools/compare/pvsa_fair_timer.py`
-- 统一对比测速入口：`tools/analysis_tools/compare/benchmark_compare.py`
+- PVSA 和其他模型统一测速入口：`tools/analysis_tools/compare/benchmark_compare.py`
+- PVSA 阶段计时适配器：`tools/analysis_tools/compare/pvsa_fair_timer.py`
+- 旧版统一脚本备份：`tools/analysis_tools/compare/_backup/benchmark_compare_before_pvsa.py`
+- 旧版 PVSA 独立入口备份：`tools/analysis_tools/compare/_backup/benchmark_pvsa_before_unification.py`
 - 对比模型代码：`mmseg/models/backbones/compare/`
 - 对比实验配置：`configs-h/compare/`

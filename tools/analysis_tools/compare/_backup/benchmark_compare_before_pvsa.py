@@ -26,7 +26,6 @@ from mmseg.registry import MODELS
 from mmseg.utils import register_all_modules
 import mmseg.models.backbones.compare  # noqa: F401
 
-from pvsa_fair_timer import PVSAFairStageTimer
 
 
 def _str_to_bool(value):
@@ -82,28 +81,6 @@ def _build_model(cfg: Config, checkpoint: Optional[str], device: torch.device):
     model.to(device)
     model.eval()
     return model
-
-
-def _is_pvsa_model(cfg: Config) -> bool:
-    backbone = cfg.model.get("backbone", {})
-    return backbone.get("type") in ("BiFormer_fusion", "VTFormer")
-
-
-def _attach_model_timer(model, cfg: Config, interval: int):
-    """为原始 PVSA 主干安装统一测速所需的计时接口。"""
-    if not _is_pvsa_model(cfg):
-        return None
-    backbone = model.backbone
-    timer = PVSAFairStageTimer(
-        backbone,
-        model_name=cfg.model.backbone.get("model_name", "pvsa"),
-        interval=interval)
-    # 将 PVSA 专用钩子计时器适配到统一测速接口。
-    backbone.compare_timer = timer
-    backbone.set_attention_debug = timer.configure
-    backbone.flush_attention_report = timer.flush
-    backbone._pvsa_fair_stage_timer = timer
-    return timer
 
 
 def _set_timer(model, enabled: bool, interval: int):
@@ -291,24 +268,16 @@ def main():
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
     model = _build_model(cfg, args.checkpoint, device)
-    pvsa_timer = _attach_model_timer(model, cfg, args.debug_interval)
     height, width = args.input_size
     inputs = torch.randn(args.batch_size, 3, height, width, device=device)
     print(f"[COMPARE] model={cfg.model.backbone.get('model_name', 'compare')} "
           f"input=({height}, {width}) batch={args.batch_size} device={device}")
 
-    try:
-        runs = [
-            _run_one(model, inputs, device, args, run_index)
-            for run_index in range(1, args.repeat_times + 1)]
-    finally:
-        if pvsa_timer is not None:
-            pvsa_timer.close()
+    runs = [
+        _run_one(model, inputs, device, args, run_index)
+        for run_index in range(1, args.repeat_times + 1)]
     average_fps = sum(item["fps"] for item in runs) / len(runs)
-    model_type = cfg.model.backbone.get("type", "unknown")
     result = dict(
-        model_type=model_type,
-        model_family="pvsa" if _is_pvsa_model(cfg) else "compare",
         config=os.path.abspath(args.config),
         checkpoint=os.path.abspath(args.checkpoint) if args.checkpoint else None,
         input_size=[height, width],
