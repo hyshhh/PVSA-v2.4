@@ -14,8 +14,8 @@ export CXX=/usr/bin/g++-11
 
 统一测速脚本支持以下两种模式：
 
-- `--cuda-graph true`：使用固定输入捕获并重放 CUDA Graph，统计整体吞吐率；
-- `--cuda-graph false`：使用普通前向，适合同时统计 `S1` 到 `S4` 阶段耗时。省略该参数时默认使用 `true`，因此普通前向命令应显式写成 `false`。
+- `--cuda-graph true`：使用固定输入捕获并重放 CUDA Graph，统计整体吞吐率。本说明中的测速命令统一使用该模式；
+- `--cuda-graph false`：仅用于 CUDA 后端未编译完成或需要排查问题时的普通前向测试。
 
 开启 `--debug` 时，程序会在普通前向阶段输出注意力耗时和阶段总耗时。若同时使用 `--cuda-graph true`，整体 `fps` 来自 CUDA Graph，阶段耗时来自随后自动执行的普通前向调试阶段。
 
@@ -51,22 +51,22 @@ export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options \
-  model.backbone.topp_flash_backend=None \
+  model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=0 \
   --input-size 256 256 \
-  --cuda-graph false \
+  --cuda-graph true \
   --cudnn-benchmark \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
   --debug \
   --debug-interval 100 \
-  --output work_dirs/compare/pvsa/fps_attention_eager.json
+  --output work_dirs/compare/pvsa/fps_attention_cuda_graph.json
 ```
 
 PVSA 的统一公平基准使用 `tools/analysis_tools/compare/pvsa_fair_timer.py` 统计 `PA` 注意力模块和阶段外层总耗时；原始测速入口仍然保留，不影响原有测试方法。结果表中的 PVSA 阶段数据应统一来自该公平基准，不要与原始入口的旧版调试输出混用。
 
-注意：`topp_flash_backend=None` 是 `torch` 动态路由路径，不能配合 `--cuda-graph true`。使用该后端时必须写 `--cuda-graph false`；只有自定义 CUDA 后端编译完成后，才能使用 `--cuda-graph true`。
+本说明统一使用 `--cuda-graph true`。PVSA 必须设置 `model.backbone.topp_flash_backend=cuda`，并确认自定义 CUDA 扩展已经编译完成；如果扩展不可用，才改用 `--cuda-graph false`。
 
 ## 四、BiFormer-T，支持 S、B（更换字母）
 
@@ -84,7 +84,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_biformer_t.py \
   configs-h/compare/biformer_t-compare_gqy-256x256.py \
   --input-size 224 224 \
-  --cuda-graph false \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
@@ -112,7 +112,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_swin_t.py \
   configs-h/compare/swin_t-compare_gqy-256x256.py \
   --input-size 224 224 \
-  --cuda-graph false \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
@@ -140,7 +140,7 @@ python tools/train.py \
 python tools/analysis_tools/compare/benchmark_vit_t.py \
   configs-h/compare/vit_t-compare_gqy-256x256.py \
   --input-size 224 224 \
-  --cuda-graph false \
+  --cuda-graph true \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
