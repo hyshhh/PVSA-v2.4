@@ -35,8 +35,12 @@ class CompareAttentionTimer:
         self.interval = max(int(interval), 1)
         self._pending_cuda = OrderedDict()
         self._pending_cpu = OrderedDict()
+        self._pending_total_cuda = OrderedDict()
+        self._pending_total_cpu = OrderedDict()
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}
+        self._total_sums = {stage: 0.0 for stage in STAGE_NAMES}
+        self._total_samples = {stage: 0 for stage in STAGE_NAMES}
         self._image_count = 0
         self._last_report = None
         self._reports = []
@@ -53,8 +57,12 @@ class CompareAttentionTimer:
     def reset(self) -> None:
         self._pending_cuda.clear()
         self._pending_cpu.clear()
+        self._pending_total_cuda.clear()
+        self._pending_total_cpu.clear()
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}
+        self._total_sums = {stage: 0.0 for stage in STAGE_NAMES}
+        self._total_samples = {stage: 0 for stage in STAGE_NAMES}
         self._image_count = 0
         self._last_report = None
         self._reports.clear()
@@ -65,6 +73,47 @@ class CompareAttentionTimer:
             return
         self._pending_cuda.clear()
         self._pending_cpu.clear()
+        self._pending_total_cuda.clear()
+        self._pending_total_cpu.clear()
+
+    @staticmethod
+    def _is_capturing() -> bool:
+        if not torch.cuda.is_available():
+            return False
+        try:
+            return bool(torch.cuda.is_current_stream_capturing())
+        except RuntimeError:
+            return False
+
+    def begin_stage(self, stage: str, tensor: Optional[torch.Tensor] = None):
+        """开始记录一个完整 stage（下采样 + Transformer Block）。"""
+        if not self.enabled or stage not in STAGE_NAMES:
+            return None
+        is_capturing = self._is_capturing()
+        if tensor is not None and tensor.is_cuda and not is_capturing:
+            stream = torch.cuda.current_stream(tensor.device)
+            start = torch.cuda.Event(enable_timing=True)
+            start.record(stream)
+            return ("cuda", start, stream, max(int(tensor.shape[0]), 1))
+        return ("cpu", time.perf_counter(),
+                max(int(tensor.shape[0]), 1) if tensor is not None else 1)
+
+    def end_stage(self, stage: str, token, batch_size: int = 1) -> None:
+        if token is None or not self.enabled or stage not in STAGE_NAMES:
+            return
+        kind = token[0]
+        batch_size = max(int(batch_size), 1)
+        if kind == "cuda":
+            _, start, stream, _ = token
+            end = torch.cuda.Event(enable_timing=True)
+            end.record(stream)
+            self._pending_total_cuda.setdefault(stage, []).append(
+                (start, end, batch_size))
+        else:
+            _, start_time, _ = token
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            self._pending_total_cpu.setdefault(stage, []).append(
+                (elapsed_ms, batch_size))
 
     def measure(self,
                 stage: str,
@@ -76,9 +125,7 @@ class CompareAttentionTimer:
             return fn()
 
         batch_size = max(int(batch_size), 1)
-        is_capturing = (
-            torch.cuda.is_current_stream_capturing()
-            if torch.cuda.is_available() else False)
+        is_capturing = self._is_capturing()
         use_cuda_event = (
             tensor is not None and tensor.is_cuda and torch.cuda.is_available()
             and not is_capturing)
@@ -99,26 +146,39 @@ class CompareAttentionTimer:
             (elapsed_ms, batch_size))
         return output
 
-    def _consume_pending(self) -> None:
-        """结算当前一次主干前向中各阶段的总注意力耗时。"""
+    @staticmethod
+    def _collect_pending(pending_cuda, pending_cpu):
         per_forward = {stage: 0.0 for stage in STAGE_NAMES}
         has_sample = {stage: False for stage in STAGE_NAMES}
-        for stage, events in self._pending_cuda.items():
+        for stage, events in pending_cuda.items():
             for start, end, event_batch_size in events:
                 end.synchronize()
                 elapsed_ms = float(start.elapsed_time(end))
                 per_forward[stage] += elapsed_ms / max(event_batch_size, 1)
                 has_sample[stage] = True
-        for stage, records in self._pending_cpu.items():
+        for stage, records in pending_cpu.items():
             for elapsed_ms, event_batch_size in records:
                 per_forward[stage] += elapsed_ms / max(event_batch_size, 1)
                 has_sample[stage] = True
+        return per_forward, has_sample
+
+    def _consume_pending(self) -> None:
+        """结算注意力耗时和完整 stage 耗时。"""
+        attention, has_attention = self._collect_pending(
+            self._pending_cuda, self._pending_cpu)
+        stage_total, has_stage_total = self._collect_pending(
+            self._pending_total_cuda, self._pending_total_cpu)
         for stage in STAGE_NAMES:
-            if has_sample[stage]:
-                self._sums[stage] += per_forward[stage]
+            if has_attention[stage]:
+                self._sums[stage] += attention[stage]
                 self._samples[stage] += 1
+            if has_stage_total[stage]:
+                self._total_sums[stage] += stage_total[stage]
+                self._total_samples[stage] += 1
         self._pending_cuda.clear()
         self._pending_cpu.clear()
+        self._pending_total_cuda.clear()
+        self._pending_total_cpu.clear()
 
     def finish_forward(self, batch_size: int = 1) -> Optional[Dict[str, float]]:
         if not self.enabled:
@@ -137,7 +197,8 @@ class CompareAttentionTimer:
         """输出尚未达到 interval 的尾部样本。"""
         if not self.enabled:
             return None
-        if self._pending_cuda or self._pending_cpu:
+        if (self._pending_cuda or self._pending_cpu
+                or self._pending_total_cuda or self._pending_total_cpu):
             self._consume_pending()
         if self._image_count <= 0:
             return self._last_report
@@ -147,19 +208,26 @@ class CompareAttentionTimer:
         report = OrderedDict()
         for stage in STAGE_NAMES:
             samples = self._samples[stage]
+            total_samples = self._total_samples[stage]
             report[stage] = (self._sums[stage] / samples) if samples else 0.0
+            report[f"{stage}_total"] = (
+                self._total_sums[stage] / total_samples
+                if total_samples else 0.0)
         report["images"] = self._image_count
         report["model"] = self.model_name
         self._last_report = dict(report)
         self._reports.append(dict(report))
         text = " ".join(
-            f"{stage}_attention={report[stage]:.4f}ms"
+            f"{stage}_attention={report[stage]:.4f}ms "
+            f"{stage}_total={report[f'{stage}_total']:.4f}ms"
             for stage in STAGE_NAMES)
         print(
             f"[COMPARE-ATTN] model={self.model_name} "
             f"images={self._image_count} {text}")
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}
+        self._total_sums = {stage: 0.0 for stage in STAGE_NAMES}
+        self._total_samples = {stage: 0 for stage in STAGE_NAMES}
         self._image_count = 0
         return dict(report)
 
@@ -337,10 +405,12 @@ class CompareBackboneBase(nn.Module):
         outputs = []
         for stage_idx, (downsample, blocks) in enumerate(
                 zip(self.downsamples, self.stages)):
-            x = downsample(x)
             stage_name = STAGE_NAMES[stage_idx]
+            stage_token = self.compare_timer.begin_stage(stage_name, x)
+            x = downsample(x)
             for block in blocks:
                 x = block(x, self.compare_timer, stage_name)
+            self.compare_timer.end_stage(stage_name, stage_token, x.shape[0])
             outputs.append(x)
         self.compare_timer.finish_forward(x.shape[0])
         return outputs
