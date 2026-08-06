@@ -22,8 +22,8 @@ STAGE_NAMES = ("S1", "S2", "S3", "S4")
 class CompareAttentionTimer:
     """累计四个阶段的注意力耗时。
 
-    计时使用事件包住每个注意力模块，但只在一次主干前向结束时同步，避免
-    在每个模块之后频繁同步。报告中的单位是单张图毫秒。
+    普通前向使用 CUDA Event 包住注意力模块和完整 stage；CUDA Graph 模式下，
+    事件会在捕获阶段作为图内节点记录，重放完成后在图外读取 elapsed_time。
     """
 
     def __init__(self,
@@ -37,6 +37,10 @@ class CompareAttentionTimer:
         self._pending_cpu = OrderedDict()
         self._pending_total_cuda = OrderedDict()
         self._pending_total_cpu = OrderedDict()
+        self._graph_attention_cuda = OrderedDict()
+        self._graph_total_cuda = OrderedDict()
+        self._graph_capture = False
+        self._timing_mode = "eager"
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}
         self._total_sums = {stage: 0.0 for stage in STAGE_NAMES}
@@ -59,6 +63,10 @@ class CompareAttentionTimer:
         self._pending_cpu.clear()
         self._pending_total_cuda.clear()
         self._pending_total_cpu.clear()
+        self._graph_attention_cuda.clear()
+        self._graph_total_cuda.clear()
+        self._graph_capture = False
+        self._timing_mode = "eager"
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}
         self._total_sums = {stage: 0.0 for stage in STAGE_NAMES}
@@ -67,14 +75,6 @@ class CompareAttentionTimer:
         self._last_report = None
         self._reports.clear()
         self._last_batch_size = 1
-
-    def begin_forward(self) -> None:
-        if not self.enabled:
-            return
-        self._pending_cuda.clear()
-        self._pending_cpu.clear()
-        self._pending_total_cuda.clear()
-        self._pending_total_cpu.clear()
 
     @staticmethod
     def _is_capturing() -> bool:
@@ -85,14 +85,70 @@ class CompareAttentionTimer:
         except RuntimeError:
             return False
 
+    @staticmethod
+    def _new_event(graph_capture: bool = False):
+        if not graph_capture:
+            return torch.cuda.Event(enable_timing=True)
+        try:
+            # external=True keeps event record nodes visible in the captured graph.
+            return torch.cuda.Event(enable_timing=True, external=True)
+        except TypeError as exc:
+            raise RuntimeError(
+                "CUDA Graph 阶段计时需要当前 PyTorch 支持 "
+                "torch.cuda.Event(external=True)；请升级 PyTorch，或使用 "
+                "--debug false。") from exc
+
+    def validate_graph_timing_support(self) -> None:
+        """在正式捕获前验证图内事件接口。"""
+        self._new_event(graph_capture=True)
+
+    def begin_graph_capture(self) -> None:
+        if not self.enabled:
+            raise RuntimeError("启用 CUDA Graph 阶段计时前必须先启用计时器")
+        self._pending_cuda.clear()
+        self._pending_cpu.clear()
+        self._pending_total_cuda.clear()
+        self._pending_total_cpu.clear()
+        self._graph_attention_cuda.clear()
+        self._graph_total_cuda.clear()
+        # 在正式捕获前先验证当前 PyTorch 是否支持 external event。
+        self._new_event(graph_capture=True)
+        self._timing_mode = "cuda_graph"
+        self._graph_capture = True
+
+    def end_graph_capture(self) -> None:
+        if not self._graph_capture:
+            return
+        self._graph_capture = False
+        if not self._graph_attention_cuda and not self._graph_total_cuda:
+            raise RuntimeError(
+                "CUDA Graph 捕获完成，但没有记录到阶段事件；请确认模型使用了 "
+                "统一对比计时器。")
+
+    def begin_forward(self) -> None:
+        """开始一次普通前向，清理上一轮尚未结算的事件。"""
+        if not self.enabled:
+            return
+        self._pending_cuda.clear()
+        self._pending_cpu.clear()
+        self._pending_total_cuda.clear()
+        self._pending_total_cpu.clear()
+
     def begin_stage(self, stage: str, tensor: Optional[torch.Tensor] = None):
         """开始记录一个完整 stage（下采样 + Transformer Block）。"""
         if not self.enabled or stage not in STAGE_NAMES:
             return None
+        if self._graph_capture:
+            if tensor is None or not tensor.is_cuda:
+                raise RuntimeError("CUDA Graph 阶段计时需要 CUDA 输入张量")
+            stream = torch.cuda.current_stream(tensor.device)
+            start = self._new_event(graph_capture=True)
+            start.record(stream)
+            return ("graph", start, stream, max(int(tensor.shape[0]), 1))
         is_capturing = self._is_capturing()
         if tensor is not None and tensor.is_cuda and not is_capturing:
             stream = torch.cuda.current_stream(tensor.device)
-            start = torch.cuda.Event(enable_timing=True)
+            start = self._new_event()
             start.record(stream)
             return ("cuda", start, stream, max(int(tensor.shape[0]), 1))
         return ("cpu", time.perf_counter(),
@@ -103,12 +159,13 @@ class CompareAttentionTimer:
             return
         kind = token[0]
         batch_size = max(int(batch_size), 1)
-        if kind == "cuda":
+        if kind in ("cuda", "graph"):
             _, start, stream, _ = token
-            end = torch.cuda.Event(enable_timing=True)
+            end = self._new_event(graph_capture=(kind == "graph"))
             end.record(stream)
-            self._pending_total_cuda.setdefault(stage, []).append(
-                (start, end, batch_size))
+            target = (self._graph_total_cuda
+                      if kind == "graph" else self._pending_total_cuda)
+            target.setdefault(stage, []).append((start, end, batch_size))
         else:
             _, start_time, _ = token
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
@@ -125,16 +182,30 @@ class CompareAttentionTimer:
             return fn()
 
         batch_size = max(int(batch_size), 1)
+        if self._graph_capture:
+            if tensor is None or not tensor.is_cuda:
+                raise RuntimeError("CUDA Graph 注意力计时需要 CUDA 输入张量")
+            stream = torch.cuda.current_stream(tensor.device)
+            start = self._new_event(graph_capture=True)
+            start.record(stream)
+            output = fn()
+            end = self._new_event(graph_capture=True)
+            end.record(stream)
+            self._graph_attention_cuda.setdefault(stage, []).append(
+                (start, end, batch_size))
+            return output
+
         is_capturing = self._is_capturing()
         use_cuda_event = (
             tensor is not None and tensor.is_cuda and torch.cuda.is_available()
             and not is_capturing)
         if use_cuda_event:
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record(torch.cuda.current_stream(tensor.device))
+            stream = torch.cuda.current_stream(tensor.device)
+            start = self._new_event()
+            end = self._new_event()
+            start.record(stream)
             output = fn()
-            end.record(torch.cuda.current_stream(tensor.device))
+            end.record(stream)
             self._pending_cuda.setdefault(stage, []).append(
                 (start, end, batch_size))
             return output
@@ -162,12 +233,8 @@ class CompareAttentionTimer:
                 has_sample[stage] = True
         return per_forward, has_sample
 
-    def _consume_pending(self) -> None:
-        """结算注意力耗时和完整 stage 耗时。"""
-        attention, has_attention = self._collect_pending(
-            self._pending_cuda, self._pending_cpu)
-        stage_total, has_stage_total = self._collect_pending(
-            self._pending_total_cuda, self._pending_total_cpu)
+    def _accumulate(self, attention, has_attention, stage_total,
+                    has_stage_total, batch_size: int) -> None:
         for stage in STAGE_NAMES:
             if has_attention[stage]:
                 self._sums[stage] += attention[stage]
@@ -175,30 +242,55 @@ class CompareAttentionTimer:
             if has_stage_total[stage]:
                 self._total_sums[stage] += stage_total[stage]
                 self._total_samples[stage] += 1
+        self._image_count += max(int(batch_size), 1)
+
+    def _consume_pending(self) -> None:
+        """结算普通前向的注意力耗时和完整 stage 耗时。"""
+        attention, has_attention = self._collect_pending(
+            self._pending_cuda, self._pending_cpu)
+        stage_total, has_stage_total = self._collect_pending(
+            self._pending_total_cuda, self._pending_total_cpu)
+        self._accumulate(attention, has_attention, stage_total,
+                         has_stage_total, self._last_batch_size)
         self._pending_cuda.clear()
         self._pending_cpu.clear()
         self._pending_total_cuda.clear()
         self._pending_total_cpu.clear()
 
-    def finish_forward(self, batch_size: int = 1) -> Optional[Dict[str, float]]:
+    def consume_graph_replay(self, batch_size: int = 1):
+        """在一次 CUDA Graph 重放完成后读取图内事件。"""
         if not self.enabled:
             return None
+        if self._graph_capture:
+            raise RuntimeError("CUDA Graph 尚未结束捕获，不能读取图内事件")
+        attention, has_attention = self._collect_pending(
+            self._graph_attention_cuda, {})
+        stage_total, has_stage_total = self._collect_pending(
+            self._graph_total_cuda, {})
+        self._accumulate(attention, has_attention, stage_total,
+                         has_stage_total, batch_size)
+        self._graph_attention_cuda.clear()
+        self._graph_total_cuda.clear()
+        if self._image_count >= self.interval:
+            return self._emit_report()
+        return None
 
-        # 这里累加的是一个阶段内所有 Transformer-Block 注意力的总时间，
-        # 最终报告为单张图片的阶段平均耗时。
-        self._consume_pending()
-        self._last_batch_size = max(int(batch_size), 1)
-        self._image_count += self._last_batch_size
-        if self._image_count < self.interval:
+    def finish_forward(self, batch_size: int = 1) -> Optional[Dict[str, float]]:
+        if not self.enabled or self._graph_capture:
             return None
-        return self._emit_report()
+        self._last_batch_size = max(int(batch_size), 1)
+        self._consume_pending()
+        if self._image_count >= self.interval:
+            return self._emit_report()
+        return None
 
     def flush(self) -> Optional[Dict[str, float]]:
         """输出尚未达到 interval 的尾部样本。"""
-        if not self.enabled:
-            return None
+        if not self.enabled or self._graph_capture:
+            return self._last_report
         if (self._pending_cuda or self._pending_cpu
                 or self._pending_total_cuda or self._pending_total_cpu):
+            self._last_batch_size = 1
             self._consume_pending()
         if self._image_count <= 0:
             return self._last_report
@@ -221,8 +313,10 @@ class CompareAttentionTimer:
             f"{stage}_attention={report[stage]:.4f}ms "
             f"{stage}_total={report[f'{stage}_total']:.4f}ms"
             for stage in STAGE_NAMES)
+        tag = ("[COMPARE-CUDA-GRAPH-ATTN]"
+               if self._timing_mode == "cuda_graph" else "[COMPARE-ATTN]")
         print(
-            f"[COMPARE-ATTN] model={self.model_name} "
+            f"{tag} model={self.model_name} "
             f"images={self._image_count} {text}")
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}

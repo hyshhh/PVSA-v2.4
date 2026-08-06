@@ -35,6 +35,10 @@ class PVSAFairStageTimer:
         self._pending_total_cpu = OrderedDict()
         self._starts = {}
         self._total_starts = {}
+        self._graph_attention_cuda = OrderedDict()
+        self._graph_total_cuda = OrderedDict()
+        self._graph_capture = False
+        self._timing_mode = "eager"
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}
         self._total_sums = {stage: 0.0 for stage in STAGE_NAMES}
@@ -116,13 +120,56 @@ class PVSAFairStageTimer:
         except RuntimeError:
             return False
 
+    @staticmethod
+    def _new_event(graph_capture: bool = False):
+        if not graph_capture:
+            return torch.cuda.Event(enable_timing=True)
+        try:
+            return torch.cuda.Event(enable_timing=True, external=True)
+        except TypeError as exc:
+            raise RuntimeError(
+                "CUDA Graph 阶段计时需要当前 PyTorch 支持 "
+                "torch.cuda.Event(external=True)；请升级 PyTorch，或使用 "
+                "--debug false。") from exc
+
+    def validate_graph_timing_support(self) -> None:
+        """在正式捕获前验证图内事件接口。"""
+        self._new_event(graph_capture=True)
+
+    def begin_graph_capture(self) -> None:
+        if not self.enabled:
+            raise RuntimeError("启用 CUDA Graph 阶段计时前必须先启用计时器")
+        self._pending_cuda.clear()
+        self._pending_cpu.clear()
+        self._pending_total_cuda.clear()
+        self._pending_total_cpu.clear()
+        self._graph_attention_cuda.clear()
+        self._graph_total_cuda.clear()
+        self._new_event(graph_capture=True)
+        self._timing_mode = "cuda_graph"
+        self._graph_capture = True
+
+    def end_graph_capture(self) -> None:
+        if not self._graph_capture:
+            return
+        self._graph_capture = False
+        if not self._graph_attention_cuda and not self._graph_total_cuda:
+            raise RuntimeError(
+                "CUDA Graph 捕获完成，但没有记录到 PVSA 阶段事件；请确认模型 "
+                "使用了 PVSA 公平计时器。")
+
     def _start_record(self, inputs):
         if not inputs or not isinstance(inputs[0], torch.Tensor):
             return None
         tensor = inputs[0]
+        if tensor.is_cuda and self._graph_capture:
+            stream = torch.cuda.current_stream(tensor.device)
+            start = self._new_event(graph_capture=True)
+            start.record(stream)
+            return ("graph", start, stream, max(int(tensor.shape[0]), 1))
         if tensor.is_cuda and not self._is_capturing():
             stream = torch.cuda.current_stream(tensor.device)
-            start = torch.cuda.Event(enable_timing=True)
+            start = self._new_event()
             start.record(stream)
             return ("cuda", start, stream, max(int(tensor.shape[0]), 1))
         if not tensor.is_cuda:
@@ -130,17 +177,20 @@ class PVSAFairStageTimer:
                     max(int(tensor.shape[0]), 1))
         return None
 
-    @staticmethod
-    def _finish_record(record, stage, pending_cuda, pending_cpu):
+    def _finish_record(self, record, stage, pending_cuda, pending_cpu,
+                       graph_cuda=None):
         if record is None:
             return
         kind = record[0]
-        if kind == "cuda":
+        if kind in ("cuda", "graph"):
             _, start, stream, batch_size = record
-            end = torch.cuda.Event(enable_timing=True)
+            end = self._new_event(graph_capture=(kind == "graph"))
             end.record(stream)
-            pending_cuda.setdefault(stage, []).append(
-                (start, end, max(int(batch_size), 1)))
+            target = (graph_cuda
+                      if kind == "graph" else pending_cuda)
+            if target is not None:
+                target.setdefault(stage, []).append(
+                    (start, end, max(int(batch_size), 1)))
         else:
             _, start_time, batch_size = record
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
@@ -159,7 +209,8 @@ class PVSAFairStageTimer:
                 return
             record = self._starts.pop(id(module), None)
             self._finish_record(
-                record, stage, self._pending_cuda, self._pending_cpu)
+                record, stage, self._pending_cuda, self._pending_cpu,
+                self._graph_attention_cuda)
         return hook
 
     def _make_total_pre_hook(self, stage: str):
@@ -175,7 +226,7 @@ class PVSAFairStageTimer:
             record = self._total_starts.pop(stage, None)
             self._finish_record(
                 record, stage, self._pending_total_cuda,
-                self._pending_total_cpu)
+                self._pending_total_cpu, self._graph_total_cuda)
         return hook
 
     def _backbone_pre_hook(self, module, inputs):
@@ -188,13 +239,13 @@ class PVSAFairStageTimer:
             self._total_starts.clear()
 
     def _backbone_post_hook(self, module, inputs, output):
-        if not self.enabled:
+        if not self.enabled or self._graph_capture:
             return
         batch_size = 1
         if inputs and isinstance(inputs[0], torch.Tensor):
             batch_size = inputs[0].shape[0]
+        self._last_batch_size = max(int(batch_size), 1)
         self._consume_pending()
-        self._image_count += max(int(batch_size), 1)
         if self._image_count >= self.interval:
             self._emit_report()
 
@@ -212,6 +263,10 @@ class PVSAFairStageTimer:
         self._pending_total_cpu.clear()
         self._starts.clear()
         self._total_starts.clear()
+        self._graph_attention_cuda.clear()
+        self._graph_total_cuda.clear()
+        self._graph_capture = False
+        self._timing_mode = "eager"
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}
         self._total_sums = {stage: 0.0 for stage in STAGE_NAMES}
@@ -219,6 +274,7 @@ class PVSAFairStageTimer:
         self._image_count = 0
         self._last_report = None
         self._reports.clear()
+        self._last_batch_size = 1
 
     @staticmethod
     def _collect_pending(pending_cuda, pending_cpu):
@@ -235,11 +291,8 @@ class PVSAFairStageTimer:
                 has_sample[stage] = True
         return per_forward, has_sample
 
-    def _consume_pending(self) -> None:
-        attention, has_attention = self._collect_pending(
-            self._pending_cuda, self._pending_cpu)
-        stage_total, has_stage_total = self._collect_pending(
-            self._pending_total_cuda, self._pending_total_cpu)
+    def _accumulate(self, attention, has_attention, stage_total,
+                    has_stage_total, batch_size: int) -> None:
         for stage in STAGE_NAMES:
             if has_attention[stage]:
                 self._sums[stage] += attention[stage]
@@ -247,10 +300,38 @@ class PVSAFairStageTimer:
             if has_stage_total[stage]:
                 self._total_sums[stage] += stage_total[stage]
                 self._total_samples[stage] += 1
+        self._image_count += max(int(batch_size), 1)
+
+    def _consume_pending(self) -> None:
+        attention, has_attention = self._collect_pending(
+            self._pending_cuda, self._pending_cpu)
+        stage_total, has_stage_total = self._collect_pending(
+            self._pending_total_cuda, self._pending_total_cpu)
+        batch_size = self._last_batch_size if hasattr(self, '_last_batch_size') else 1
+        self._accumulate(attention, has_attention, stage_total,
+                         has_stage_total, batch_size)
         self._pending_cuda.clear()
         self._pending_cpu.clear()
         self._pending_total_cuda.clear()
         self._pending_total_cpu.clear()
+
+    def consume_graph_replay(self, batch_size: int = 1):
+        """在一次 CUDA Graph 重放完成后读取图内事件。"""
+        if not self.enabled:
+            return None
+        if self._graph_capture:
+            raise RuntimeError("CUDA Graph 尚未结束捕获，不能读取图内事件")
+        attention, has_attention = self._collect_pending(
+            self._graph_attention_cuda, {})
+        stage_total, has_stage_total = self._collect_pending(
+            self._graph_total_cuda, {})
+        self._accumulate(attention, has_attention, stage_total,
+                         has_stage_total, batch_size)
+        self._graph_attention_cuda.clear()
+        self._graph_total_cuda.clear()
+        if self._image_count >= self.interval:
+            return self._emit_report()
+        return None
 
     def _emit_report(self) -> Dict[str, float]:
         report = OrderedDict()
@@ -269,7 +350,9 @@ class PVSAFairStageTimer:
             f"{stage}_attention={report[stage]:.4f}ms "
             f"{stage}_total={report[f'{stage}_total']:.4f}ms"
             for stage in STAGE_NAMES)
-        print(f"[COMPARE-ATTN] model={self.model_name} "
+        tag = ("[COMPARE-CUDA-GRAPH-ATTN]"
+               if self._timing_mode == "cuda_graph" else "[COMPARE-ATTN]")
+        print(f"{tag} model={self.model_name} "
               f"images={self._image_count} {text}")
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}

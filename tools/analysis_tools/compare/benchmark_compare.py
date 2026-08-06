@@ -132,6 +132,14 @@ def _attach_model_timer(model, cfg: Config, interval: int):
     return timer
 
 
+def _get_attention_timer(model):
+    backbone = getattr(model, "backbone", model)
+    timer = getattr(backbone, "compare_timer", None)
+    if timer is None:
+        raise AttributeError("配置中的主干缺少统一阶段计时器")
+    return timer
+
+
 def _set_timer(model, enabled: bool, interval: int):
     backbone = getattr(model, "backbone", model)
     if hasattr(backbone, "set_attention_debug"):
@@ -216,21 +224,31 @@ class _CudaGraphForward:
     """固定输入尺寸的完整分割网络 CUDA Graph 捕获器。"""
 
     def __init__(self, model, inputs: torch.Tensor, warmup: int,
-                 device: torch.device) -> None:
+                 device: torch.device, capture_timing: bool = False,
+                 timer=None, timer_interval: int = 100) -> None:
         if device.type != "cuda":
             raise RuntimeError("CUDA Graph 需要显卡设备")
+        if capture_timing and timer is None:
+            raise RuntimeError("CUDA Graph 阶段计时缺少统一计时器")
         self.model = model
         self.device = device
         self.graph_input = inputs.detach().clone()
         self.graph = torch.cuda.CUDAGraph()
         self.graph_output = None
+        self.capture_timing = bool(capture_timing)
+        self.timer = timer
 
-        # 捕获前先关闭阶段事件计时；CUDA Graph 捕获期间不能同步计时事件。
+        # 预热不插入图内事件，避免把预热阶段计入报告。
         _set_timer(model, False, 1)
         with torch.inference_mode():
             for _ in range(max(int(warmup), 1)):
                 model._forward(self.graph_input, None)
         torch.cuda.synchronize(device)
+
+        if self.capture_timing:
+            timer.reset()
+            timer.configure(enabled=True, interval=timer_interval)
+            timer.begin_graph_capture()
 
         try:
             with torch.inference_mode():
@@ -238,20 +256,34 @@ class _CudaGraphForward:
                     self.graph_output = model._forward(self.graph_input, None)
             torch.cuda.synchronize(device)
         except Exception as exc:
+            if self.capture_timing:
+                timer._graph_capture = False
             raise RuntimeError(
                 "对比模型 CUDA Graph 捕获失败，请确认输入尺寸固定、模型处于 eval 模式，"
-                "并检查显卡与框架版本是否支持 CUDA Graph。") from exc
-        print("[COMPARE-CUDA-GRAPH] 捕获完成")
+                "并检查显卡、框架版本和自定义 CUDA 后端是否支持 CUDA Graph。") from exc
+        finally:
+            if self.capture_timing:
+                timer.end_graph_capture()
+        print("[COMPARE-CUDA-GRAPH] 捕获完成" +
+              ("（含图内阶段事件）" if self.capture_timing else ""))
 
     def replay(self, inputs: torch.Tensor) -> None:
         # CUDA Graph 捕获阶段使用了 inference_mode；重放也必须处于同一模式，
-        # 否则较新版本的 PyTorch 会把图内静态输出视为 inference tensor，
-        # 并报“Inplace update to inference tensor outside InferenceMode”。
+        # 否则较新版本的 PyTorch 会把图内静态输出视为 inference tensor。
         with torch.inference_mode():
-            # 当前测速使用固定随机输入；保留复制逻辑，便于以后接入真实图片批次。
             if inputs.data_ptr() != self.graph_input.data_ptr():
                 self.graph_input.copy_(inputs)
             self.graph.replay()
+
+    def consume_timing(self, batch_size: int):
+        if not self.capture_timing:
+            return None
+        return self.timer.consume_graph_replay(batch_size)
+
+    def flush_timing(self):
+        if not self.capture_timing:
+            return None
+        return self.timer.flush()
 
 
 def _measure_graph_once(graph_runner: _CudaGraphForward,
@@ -264,20 +296,22 @@ def _measure_graph_once(graph_runner: _CudaGraphForward,
     return time.perf_counter() - start
 
 
-def _run_cuda_graph(model, inputs, device, args, run_index: int) -> Dict:
-    """使用 CUDA Graph 测量完整主干和解码头前向吞吐。"""
-    graph_runner = _CudaGraphForward(model, inputs, args.warmup, device)
+def _run_graph_loop(graph_runner: _CudaGraphForward, inputs, device, args,
+                    run_index: int, label: str) -> Dict:
     elapsed = []
     for index in range(max(args.iters, 1)):
         elapsed.append(_measure_graph_once(graph_runner, inputs, device))
+        graph_runner.consume_timing(args.batch_size)
         if (index + 1) % max(args.debug_interval, 1) == 0:
             fps = args.batch_size * (index + 1) / sum(elapsed)
-            print(f"[COMPARE-CUDA-GRAPH] run={run_index} iter={index + 1} "
+            print(f"[{label}] run={run_index} iter={index + 1} "
                   f"fps={fps:.4f} img/s")
+    graph_runner.flush_timing()
+
     total_seconds = sum(elapsed)
     fps = args.batch_size * len(elapsed) / total_seconds
     latency_ms = total_seconds / len(elapsed) * 1000.0
-    print(f"[COMPARE-CUDA-GRAPH] run={run_index} overall_fps={fps:.4f} img/s "
+    print(f"[{label}] run={run_index} overall_fps={fps:.4f} img/s "
           f"latency={latency_ms:.4f}ms/batch")
     return dict(
         run=run_index,
@@ -285,22 +319,51 @@ def _run_cuda_graph(model, inputs, device, args, run_index: int) -> Dict:
         latency_ms_per_batch=latency_ms,
         latency_ms_per_image=latency_ms / max(args.batch_size, 1),
         images=args.batch_size * len(elapsed),
-        attention_reports=[],
-        mode="cuda_graph")
+        attention_reports=(
+            list(graph_runner.timer.reports)
+            if graph_runner.capture_timing else []),
+        mode=("cuda_graph_attention" if graph_runner.capture_timing
+              else "cuda_graph"))
+
+
+def _run_cuda_graph(model, inputs, device, args, run_index: int) -> Dict:
+    """先测干净 CUDA Graph，再按需单独捕获带阶段事件的 Graph。"""
+    timer = None
+    if args.debug:
+        # 在正式测速前检查图内事件接口，避免先完成一轮 FPS 测试后才报错。
+        timer = _get_attention_timer(model)
+        timer.validate_graph_timing_support()
+
+    clean_runner = _CudaGraphForward(
+        model, inputs, args.warmup, device, capture_timing=False)
+    result = _run_graph_loop(
+        clean_runner, inputs, device, args, run_index, "COMPARE-CUDA-GRAPH")
+
+    if args.debug:
+        profile_runner = _CudaGraphForward(
+            model,
+            inputs,
+            args.warmup,
+            device,
+            capture_timing=True,
+            timer=timer,
+            timer_interval=args.debug_interval)
+        profile_result = _run_graph_loop(
+            profile_runner,
+            inputs,
+            device,
+            args,
+            run_index,
+            "COMPARE-CUDA-GRAPH-ATTN")
+        result["attention_reports"] = profile_result["attention_reports"]
+        result["graph_attention_profile"] = profile_result
+    return result
 
 
 def _run_one(model, inputs, device, args, run_index: int) -> Dict:
     if not args.cuda_graph:
         return _run_eager(model, inputs, device, args, run_index)
-
-    result = _run_cuda_graph(model, inputs, device, args, run_index)
-    if args.debug:
-        print("[COMPARE-ATTN] CUDA Graph 不进行阶段事件计时，开始普通前向阶段统计")
-        debug_result = _run_eager(
-            model, inputs, device, args, run_index, report_prefix="debug")
-        result["attention_reports"] = debug_result["attention_reports"]
-        result["debug_profile"] = debug_result
-    return result
+    return _run_cuda_graph(model, inputs, device, args, run_index)
 
 def main():
     args = parse_args()
