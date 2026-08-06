@@ -17,7 +17,7 @@ export CXX=/usr/bin/g++-11
 - `--cuda-graph true`：使用固定输入捕获并重放 CUDA Graph，统计整体吞吐率。本说明中的测速命令统一使用该模式；
 - `--cuda-graph false`：仅用于 CUDA 后端未编译完成或需要排查问题时的普通前向测试。
 
-开启 `--debug` 时，程序会在普通前向阶段输出注意力耗时和阶段总耗时。若同时使用 `--cuda-graph true`，整体 `fps` 来自 CUDA Graph，阶段耗时来自随后自动执行的普通前向调试阶段。
+当 `--debug true`（或 `--debug 1`）时，程序会在普通前向阶段输出注意力耗时和阶段总耗时；当 `--debug false`（或 `--debug 0`）时关闭阶段耗时统计。若同时使用 `--cuda-graph true`，整体 `fps` 来自 CUDA Graph，阶段耗时来自随后自动执行的普通前向调试阶段。
 
 ## 二、BiFormer-T 的 CUDA Graph 命令
 
@@ -34,7 +34,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_biformer_t.
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
-  --debug \
+  --debug true \
   --debug-interval 100 \
   --output work_dirs/compare/biformer_t/fps_attention_cuda_graph.json
 ```
@@ -59,7 +59,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
-  --debug \
+  --debug true \
   --debug-interval 100 \
   --output work_dirs/compare/pvsa/fps_attention_cuda_graph.json
 ```
@@ -88,7 +88,7 @@ python tools/analysis_tools/compare/benchmark_biformer_t.py \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
-  --debug \
+  --debug true \
   --debug-interval 100 \
   --cudnn-benchmark \
   --output work_dirs/compare/biformer_t/fps_attention.json
@@ -116,7 +116,7 @@ python tools/analysis_tools/compare/benchmark_swin_t.py \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
-  --debug \
+  --debug true \
   --debug-interval 100 \
   --cudnn-benchmark \
   --output work_dirs/compare/swin_t/fps_attention.json
@@ -144,7 +144,7 @@ python tools/analysis_tools/compare/benchmark_vit_t.py \
   --batch-size 1 \
   --warmup 30 \
   --iters 200 \
-  --debug \
+  --debug true \
   --debug-interval 100 \
   --cudnn-benchmark \
   --output work_dirs/compare/vit_t/fps_attention.json

@@ -30,7 +30,7 @@ from pvsa_fair_timer import PVSAFairStageTimer
 
 
 def _str_to_bool(value):
-    """把命令行中的 true/false 转成布尔值。"""
+    """把命令行中的 true/false/1/0 转成布尔值。"""
     if isinstance(value, bool):
         return value
     text = str(value).strip().lower()
@@ -38,7 +38,7 @@ def _str_to_bool(value):
         return True
     if text in ("false", "0", "no", "off"):
         return False
-    raise ValueError("布尔参数只能填写 true 或 false")
+    raise ValueError("布尔参数只能填写 true/false 或 1/0")
 
 
 def parse_args():
@@ -51,7 +51,15 @@ def parse_args():
     parser.add_argument("--warmup", type=int, default=30)
     parser.add_argument("--iters", type=int, default=200)
     parser.add_argument("--repeat-times", type=int, default=1)
-    parser.add_argument("--debug", action="store_true", help="输出 S1-S4 阶段耗时")
+    parser.add_argument(
+        "--debug",
+        type=_str_to_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help=(
+            "是否输出 S1-S4 阶段耗时，默认 false；"
+            "可写 --debug、--debug true/false 或 --debug 1/0。"))
     parser.add_argument("--debug-interval", type=int, default=100)
     parser.add_argument(
         "--cuda-graph",
