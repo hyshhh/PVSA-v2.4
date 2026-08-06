@@ -55,7 +55,10 @@ def test_pvsa_fair_timer_reports_attention_and_outer_stage_total():
     assert '_make_total_post_hook' in source
     assert 'downsample_layers2' in source
     assert 'consume_graph_replay' in source
-    assert 'external=True' in source
+    timing_source = (root / 'tools' / 'analysis_tools' / 'compare' /
+                     'cuda_graph_timing.py').read_text(encoding='utf-8')
+    assert 'external=True' in timing_source
+    assert 'cudaEventRecordWithFlags' in timing_source
 
     benchmark_source = (root / 'tools' / 'analysis_tools' / 'compare' /
                         'benchmark_compare.py').read_text(encoding='utf-8')

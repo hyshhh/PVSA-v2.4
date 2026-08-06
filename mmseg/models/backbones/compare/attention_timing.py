@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from tools.analysis_tools.compare.cuda_graph_timing import new_graph_event
+
 
 STAGE_NAMES = ("S1", "S2", "S3", "S4")
 
@@ -41,6 +43,7 @@ class CompareAttentionTimer:
         self._graph_total_cuda = OrderedDict()
         self._graph_capture = False
         self._timing_mode = "eager"
+        self._graph_event_backend = None
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}
         self._total_sums = {stage: 0.0 for stage in STAGE_NAMES}
@@ -67,6 +70,7 @@ class CompareAttentionTimer:
         self._graph_total_cuda.clear()
         self._graph_capture = False
         self._timing_mode = "eager"
+        self._graph_event_backend = None
         self._sums = {stage: 0.0 for stage in STAGE_NAMES}
         self._samples = {stage: 0 for stage in STAGE_NAMES}
         self._total_sums = {stage: 0.0 for stage in STAGE_NAMES}
@@ -85,18 +89,13 @@ class CompareAttentionTimer:
         except RuntimeError:
             return False
 
-    @staticmethod
-    def _new_event(graph_capture: bool = False):
+    def _new_event(self, graph_capture: bool = False):
         if not graph_capture:
             return torch.cuda.Event(enable_timing=True)
-        try:
-            # external=True keeps event record nodes visible in the captured graph.
-            return torch.cuda.Event(enable_timing=True, external=True)
-        except TypeError as exc:
-            raise RuntimeError(
-                "CUDA Graph 阶段计时需要当前 PyTorch 支持 "
-                "torch.cuda.Event(external=True)；请升级 PyTorch，或使用 "
-                "--debug false。") from exc
+        event = new_graph_event()
+        self._graph_event_backend = getattr(
+            event, "backend", "pytorch_external")
+        return event
 
     def validate_graph_timing_support(self) -> None:
         """在正式捕获前验证图内事件接口。"""
@@ -328,6 +327,10 @@ class CompareAttentionTimer:
     @property
     def last_report(self) -> Optional[Dict[str, float]]:
         return self._last_report
+
+    @property
+    def graph_event_backend(self) -> Optional[str]:
+        return self._graph_event_backend
 
     @property
     def reports(self):

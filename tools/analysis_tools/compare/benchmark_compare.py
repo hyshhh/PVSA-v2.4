@@ -322,6 +322,9 @@ def _run_graph_loop(graph_runner: _CudaGraphForward, inputs, device, args,
         attention_reports=(
             list(graph_runner.timer.reports)
             if graph_runner.capture_timing else []),
+        graph_timing_backend=(
+            graph_runner.timer.graph_event_backend
+            if graph_runner.capture_timing else None),
         mode=("cuda_graph_attention" if graph_runner.capture_timing
               else "cuda_graph"))
 
