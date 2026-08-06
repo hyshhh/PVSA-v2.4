@@ -322,27 +322,33 @@ def _run_graph_loop(graph_runner: _CudaGraphForward, inputs, device, args,
         attention_reports=(
             list(graph_runner.timer.reports)
             if graph_runner.capture_timing else []),
-        graph_timing_backend=(
-            graph_runner.timer.graph_event_backend
-            if graph_runner.capture_timing else None),
         mode=("cuda_graph_attention" if graph_runner.capture_timing
               else "cuda_graph"))
 
 
 def _run_cuda_graph(model, inputs, device, args, run_index: int) -> Dict:
-    """先测干净 CUDA Graph，再按需单独捕获带阶段事件的 Graph。"""
+    """先测干净 CUDA Graph，再按需统计阶段耗时。"""
     timer = None
+    graph_timing_error = None
     if args.debug:
-        # 在正式测速前检查图内事件接口，避免先完成一轮 FPS 测试后才报错。
+        # 旧版 PyTorch 不支持图内 external event 时，不能继续调用不兼容的
+        # CUDA 接口，否则可能直接导致进程段错误；改用明确标记的普通前向调试。
         timer = _get_attention_timer(model)
-        timer.validate_graph_timing_support()
+        try:
+            timer.validate_graph_timing_support()
+        except RuntimeError as exc:
+            if "external=True" not in str(exc):
+                raise
+            graph_timing_error = str(exc)
+            print("[COMPARE-WARN] 当前 PyTorch 不支持 CUDA Graph 图内事件，"
+                  "阶段耗时将使用普通前向调试；最终 FPS 仍来自干净 CUDA Graph。")
 
     clean_runner = _CudaGraphForward(
         model, inputs, args.warmup, device, capture_timing=False)
     result = _run_graph_loop(
         clean_runner, inputs, device, args, run_index, "COMPARE-CUDA-GRAPH")
 
-    if args.debug:
+    if args.debug and graph_timing_error is None:
         profile_runner = _CudaGraphForward(
             model,
             inputs,
@@ -360,6 +366,15 @@ def _run_cuda_graph(model, inputs, device, args, run_index: int) -> Dict:
             "COMPARE-CUDA-GRAPH-ATTN")
         result["attention_reports"] = profile_result["attention_reports"]
         result["graph_attention_profile"] = profile_result
+    elif args.debug:
+        debug_result = _run_eager(
+            model, inputs, device, args, run_index,
+            report_prefix="eager-fallback")
+        result["attention_reports"] = debug_result["attention_reports"]
+        result["debug_profile"] = debug_result
+        result["graph_timing_fallback"] = dict(
+            mode="eager",
+            reason=graph_timing_error)
     return result
 
 

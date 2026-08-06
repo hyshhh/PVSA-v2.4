@@ -66,7 +66,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
 
 PVSA 的统一公平基准使用 `tools/analysis_tools/compare/pvsa_fair_timer.py` 统计 `PA` 注意力模块和阶段外层总耗时；原始测速入口仍然保留，不影响原有测试方法。结果表中的 PVSA 阶段数据应统一来自该公平基准，不要与原始入口的旧版调试输出混用。
 
-本说明统一使用 `--cuda-graph true`。PVSA 必须设置 `model.backbone.topp_flash_backend=cuda`，并确认自定义 CUDA 扩展已经编译完成；如果扩展不可用，才改用 `--cuda-graph false`。开启图内阶段计时时，程序优先使用 `torch.cuda.Event(external=True)`；较旧版 PyTorch 会自动改用 CUDA 运行时的 `cudaEventRecordWithFlags` 外部事件接口。若两种接口都不可用，才需要升级 PyTorch 或关闭 `--debug`。
+本说明统一使用 `--cuda-graph true`。PVSA 必须设置 `model.backbone.topp_flash_backend=cuda`，并确认自定义 CUDA 扩展已经编译完成；如果扩展不可用，才改用 `--cuda-graph false`。开启图内阶段计时还要求当前 PyTorch 支持 `torch.cuda.Event(external=True)`；不支持时程序会保留干净 CUDA Graph 的 FPS，并明确回退到普通前向输出阶段调试数据，不会把回退结果当作 CUDA Graph 阶段耗时。
 
 ## 四、BiFormer-T，支持 S、B（更换字母）
 
@@ -164,7 +164,7 @@ python tools/analysis_tools/compare/benchmark_vit_t.py \
 
 - `S1`、`S2`、`S3`、`S4`：对应阶段所有注意力模块的平均耗时；
 - CUDA Graph 模式下，`attention_reports` 来自带图内事件的 Graph 重放，不再来自普通前向；
-- `graph_attention_profile` 保存带计时事件的 Graph 吞吐结果，仅用于计时校验，不作为干净 Graph 的最终 FPS；其中 `graph_timing_backend` 会记录使用的是 `pytorch_external` 还是 `cudart_external`；
+- `graph_attention_profile` 保存带计时事件的 Graph 吞吐结果，仅用于计时校验，不作为干净 Graph 的最终 FPS；
 - `S1_total`、`S2_total`、`S3_total`、`S4_total`：对应阶段外层总耗时；
 - 对比模型的阶段总耗时包含卷积下采样和 Transformer Block；
 - PVSA 的阶段总耗时包含 CNN 分支、Transformer 下采样、Transformer Block 和 FAM，不包含后置跨阶段融合、输出归一化与解码头；
@@ -188,7 +188,6 @@ python tools/analysis_tools/compare/benchmark_vit_t.py \
 - 原始 PVSA 测速：`tools/analysis_tools/benchmark.py`
 - PVSA 公平基准测速：`tools/analysis_tools/compare/benchmark_pvsa.py`
 - PVSA 公平计时器：`tools/analysis_tools/compare/pvsa_fair_timer.py`
-- CUDA Graph 图内事件兼容层：`tools/analysis_tools/compare/cuda_graph_timing.py`
 - 统一对比测速入口：`tools/analysis_tools/compare/benchmark_compare.py`
 - 对比模型代码：`mmseg/models/backbones/compare/`
 - 对比实验配置：`configs-h/compare/`
