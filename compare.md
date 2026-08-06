@@ -66,6 +66,8 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
 
 PVSA 的统一公平基准使用 `tools/analysis_tools/compare/pvsa_fair_timer.py` 统计 `PA` 注意力模块和阶段外层总耗时；原始测速入口仍然保留，不影响原有测试方法。结果表中的 PVSA 阶段数据应统一来自该公平基准，不要与原始入口的旧版调试输出混用。
 
+注意：`topp_flash_backend=None` 是 `torch` 动态路由路径，不能配合 `--cuda-graph true`。使用该后端时必须写 `--cuda-graph false`；只有自定义 CUDA 后端编译完成后，才能使用 `--cuda-graph true`。
+
 ## 四、BiFormer-T，支持 S、B（更换字母）
 
 ### 训练命令

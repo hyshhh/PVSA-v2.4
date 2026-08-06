@@ -89,6 +89,24 @@ def _is_pvsa_model(cfg: Config) -> bool:
     return backbone.get("type") in ("BiFormer_fusion", "VTFormer")
 
 
+def _validate_cuda_graph_compatibility(cfg: Config, args) -> None:
+    """在捕获前拒绝 PVSA 的动态路由路径，避免污染 CUDA 捕获状态。"""
+    if not args.cuda_graph or not _is_pvsa_model(cfg):
+        return
+
+    backbone_cfg = cfg.model.get("backbone", {})
+    backend = backbone_cfg.get("topp_flash_backend", None)
+    normalized = (str(backend).strip().lower()
+                  if backend is not None else "")
+    if normalized not in ("cuda", "cuda_forward"):
+        raise RuntimeError(
+            "--cuda-graph true 需要 PVSA 使用 CUDA 后端；当前 "
+            "model.backbone.topp_flash_backend="
+            f"{backend!r}。PVSA 的 torch 路径包含动态路由形状，不能被 CUDA "
+            "Graph 捕获。请改用 --cuda-graph false，或设置 "
+            "model.backbone.topp_flash_backend=cuda 并确认自定义 CUDA 扩展已编译。")
+
+
 def _attach_model_timer(model, cfg: Config, interval: int):
     """为原始 PVSA 主干安装统一测速所需的计时接口。"""
     if not _is_pvsa_model(cfg):
@@ -294,6 +312,7 @@ def main():
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+    _validate_cuda_graph_compatibility(cfg, args)
     model = _build_model(cfg, args.checkpoint, device)
     pvsa_timer = _attach_model_timer(model, cfg, args.debug_interval)
     height, width = args.input_size
