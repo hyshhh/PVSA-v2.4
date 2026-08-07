@@ -194,6 +194,7 @@ nvinfer1::DimsExprs TopPRoutePlugin::getOutputDimensions(
   return output;
 }
 
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
 nvinfer1::Dims TopPRoutePlugin::getOutputDimensions(
     int output_index, const nvinfer1::Dims* inputs, int nb_inputs) noexcept {
   if (inputs == nullptr || nb_inputs != kRouteInputCount) {
@@ -201,6 +202,7 @@ nvinfer1::Dims TopPRoutePlugin::getOutputDimensions(
   }
   return route_output_dims(output_index, inputs, topk_);
 }
+#endif
 
 bool TopPRoutePlugin::supportsFormatCombination(
     int pos, const nvinfer1::PluginTensorDesc* in_out, int nb_inputs,
@@ -225,6 +227,7 @@ void TopPRoutePlugin::configurePlugin(
   (void)nb_outputs;
 }
 
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
 void TopPRoutePlugin::configureWithFormat(
     const nvinfer1::PluginTensorDesc* in, int nb_inputs,
     const nvinfer1::PluginTensorDesc* out, int nb_outputs,
@@ -238,6 +241,7 @@ void TopPRoutePlugin::configureWithFormat(
   (void)format;
   (void)max_batch_size;
 }
+#endif
 
 int TopPRoutePlugin::initialize() noexcept { return 0; }
 void TopPRoutePlugin::terminate() noexcept {}
@@ -329,6 +333,7 @@ nvinfer1::DataType TopPRoutePlugin::getOutputDataType(
                     : nvinfer1::DataType::kINT32;
 }
 
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
 bool TopPRoutePlugin::isOutputBroadcastAcrossBatch(
     int output_index, const bool* input_is_broadcasted,
     int nb_inputs) const noexcept {
@@ -342,6 +347,7 @@ bool TopPRoutePlugin::canBroadcastInputAcrossBatch(int input_index) const noexce
   (void)input_index;
   return false;
 }
+#endif
 
 void TopPRoutePlugin::attachToContext(
     cudnnContext* cudnn, cublasContext* cublas,
@@ -425,6 +431,7 @@ nvinfer1::DimsExprs TopPFlashPlugin::getOutputDimensions(
   return output;
 }
 
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
 nvinfer1::Dims TopPFlashPlugin::getOutputDimensions(
     int output_index, const nvinfer1::Dims* inputs, int nb_inputs) noexcept {
   if (inputs == nullptr || nb_inputs != kFlashInputCount || output_index != 0) {
@@ -438,6 +445,7 @@ nvinfer1::Dims TopPFlashPlugin::getOutputDimensions(
   output.d[3] = dim_;
   return output;
 }
+#endif
 
 bool TopPFlashPlugin::supportsFormatCombination(
     int pos, const nvinfer1::PluginTensorDesc* in_out, int nb_inputs,
@@ -462,6 +470,7 @@ void TopPFlashPlugin::configurePlugin(
   (void)nb_outputs;
 }
 
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
 void TopPFlashPlugin::configureWithFormat(
     const nvinfer1::PluginTensorDesc* in, int nb_inputs,
     const nvinfer1::PluginTensorDesc* out, int nb_outputs,
@@ -475,6 +484,7 @@ void TopPFlashPlugin::configureWithFormat(
   (void)format;
   (void)max_batch_size;
 }
+#endif
 
 int TopPFlashPlugin::initialize() noexcept { return 0; }
 void TopPFlashPlugin::terminate() noexcept {}
@@ -591,6 +601,7 @@ nvinfer1::DataType TopPFlashPlugin::getOutputDataType(
   return nvinfer1::DataType::kFLOAT;
 }
 
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
 bool TopPFlashPlugin::isOutputBroadcastAcrossBatch(
     int output_index, const bool* input_is_broadcasted,
     int nb_inputs) const noexcept {
@@ -604,6 +615,7 @@ bool TopPFlashPlugin::canBroadcastInputAcrossBatch(int input_index) const noexce
   (void)input_index;
   return false;
 }
+#endif
 
 void TopPFlashPlugin::attachToContext(
     cudnnContext* cudnn, cublasContext* cublas,

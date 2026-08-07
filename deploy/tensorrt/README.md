@@ -41,11 +41,13 @@ export CUDA_HOME=/usr/local/cuda
 export TENSORRT_ROOT=/usr/local/TensorRT
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
+command -v g++-12 || sudo apt-get install gcc-12 g++-12
 
 cmake -S deploy/tensorrt \
   -B build/tensorrt \
   -DTENSORRT_ROOT=$TENSORRT_ROOT \
-  -DCMAKE_CUDA_ARCHITECTURES=86
+  -DCMAKE_CUDA_ARCHITECTURES=86 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12
 
 cmake --build build/tensorrt -j$(nproc)
 ```
@@ -58,6 +60,7 @@ cmake -S deploy/tensorrt \
   -B build/tensorrt_fast \
   -DTENSORRT_ROOT=$TENSORRT_ROOT \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 \
   -DPVSA_TRT_FAST_MATH=ON
 cmake --build build/tensorrt_fast -j$(nproc)
 ```

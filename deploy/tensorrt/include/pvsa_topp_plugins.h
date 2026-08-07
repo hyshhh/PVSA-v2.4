@@ -18,9 +18,11 @@ public:
   nvinfer1::DimsExprs getOutputDimensions(
       int outputIndex, const nvinfer1::DimsExprs* inputs, int nbInputs,
       nvinfer1::IExprBuilder& exprBuilder) noexcept override;
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
   nvinfer1::Dims getOutputDimensions(
       int outputIndex, const nvinfer1::Dims* inputs,
       int nbInputs) noexcept override;
+#endif
   bool supportsFormatCombination(
       int pos, const nvinfer1::PluginTensorDesc* inOut,
       int nbInputs, int nbOutputs) noexcept override;
@@ -28,11 +30,13 @@ public:
                        int nbInputs,
                        const nvinfer1::DynamicPluginTensorDesc* out,
                        int nbOutputs) noexcept override;
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
   void configureWithFormat(const nvinfer1::PluginTensorDesc* in, int nbInputs,
                            const nvinfer1::PluginTensorDesc* out,
                            int nbOutputs, nvinfer1::DataType type,
                            nvinfer1::PluginFormat format,
                            int maxBatchSize) noexcept override;
+#endif
   int initialize() noexcept override;
   void terminate() noexcept override;
   size_t getWorkspaceSize(const nvinfer1::PluginTensorDesc* inputs,
@@ -49,10 +53,12 @@ public:
   nvinfer1::DataType getOutputDataType(
       int index, const nvinfer1::DataType* inputTypes,
       int nbInputs) const noexcept override;
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
   bool isOutputBroadcastAcrossBatch(int outputIndex,
                                      const bool* inputIsBroadcasted,
                                      int nbInputs) const noexcept override;
   bool canBroadcastInputAcrossBatch(int inputIndex) const noexcept override;
+#endif
   void attachToContext(cudnnContext* cudnnContext,
                        cublasContext* cublasContext,
                        nvinfer1::IGpuAllocator* allocator) noexcept override;
@@ -84,9 +90,11 @@ public:
   nvinfer1::DimsExprs getOutputDimensions(
       int outputIndex, const nvinfer1::DimsExprs* inputs, int nbInputs,
       nvinfer1::IExprBuilder& exprBuilder) noexcept override;
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
   nvinfer1::Dims getOutputDimensions(
       int outputIndex, const nvinfer1::Dims* inputs,
       int nbInputs) noexcept override;
+#endif
   bool supportsFormatCombination(
       int pos, const nvinfer1::PluginTensorDesc* inOut,
       int nbInputs, int nbOutputs) noexcept override;
@@ -94,11 +102,13 @@ public:
                        int nbInputs,
                        const nvinfer1::DynamicPluginTensorDesc* out,
                        int nbOutputs) noexcept override;
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
   void configureWithFormat(const nvinfer1::PluginTensorDesc* in, int nbInputs,
                            const nvinfer1::PluginTensorDesc* out,
                            int nbOutputs, nvinfer1::DataType type,
                            nvinfer1::PluginFormat format,
                            int maxBatchSize) noexcept override;
+#endif
   int initialize() noexcept override;
   void terminate() noexcept override;
   size_t getWorkspaceSize(const nvinfer1::PluginTensorDesc* inputs,
@@ -115,10 +125,12 @@ public:
   nvinfer1::DataType getOutputDataType(
       int index, const nvinfer1::DataType* inputTypes,
       int nbInputs) const noexcept override;
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
   bool isOutputBroadcastAcrossBatch(int outputIndex,
                                      const bool* inputIsBroadcasted,
                                      int nbInputs) const noexcept override;
   bool canBroadcastInputAcrossBatch(int inputIndex) const noexcept override;
+#endif
   void attachToContext(cudnnContext* cudnnContext,
                        cublasContext* cublasContext,
                        nvinfer1::IGpuAllocator* allocator) noexcept override;

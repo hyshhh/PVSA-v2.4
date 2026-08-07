@@ -9,6 +9,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 export CUDA_HOME=/usr/local/cuda
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
+command -v g++-12 || sudo apt-get install gcc-12 g++-12
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 ```
 
@@ -54,6 +55,7 @@ cmake -S deploy/tensorrt \
   -DTENSORRT_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
   -DTENSORRT_LIBRARY=/usr/lib/x86_64-linux-gnu/libnvinfer.so.11.2.1 \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 \
   -DPVSA_TRT_FAST_MATH=ON
 ```
 
@@ -66,7 +68,8 @@ cmake -S deploy/tensorrt \
   -B build/tensorrt \
   -DTENSORRT_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
   -DTENSORRT_LIBRARY=/usr/lib/x86_64-linux-gnu/libnvinfer.so.11.2.1 \
-  -DCMAKE_CUDA_ARCHITECTURES=86
+  -DCMAKE_CUDA_ARCHITECTURES=86 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12
 ```
 
 ## 4. 编译
@@ -210,6 +213,7 @@ cmake -S deploy/tensorrt \
   -DTENSORRT_INCLUDE_DIR=/实际/include路径 \
   -DTENSORRT_LIBRARY=/实际/libnvinfer.so路径 \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 \
   -DPVSA_TRT_FAST_MATH=ON
 ```
 
