@@ -17,7 +17,7 @@ export CXX=/usr/bin/g++-11
 - `--cuda-graph true`：使用固定输入捕获并重放 CUDA Graph，统计整体吞吐率。本说明中的测速命令统一使用该模式；
 - `--cuda-graph false`：仅用于 CUDA 后端未编译完成或需要排查问题时的普通前向测试。
 
-当 `--debug true`（或 `--debug 1`）时，程序会额外捕获一张带图内事件的 CUDA Graph，并在重放结束后输出真实 Graph 阶段注意力耗时；当 `--debug false`（或 `--debug 0`）时只捕获干净 Graph 并关闭阶段计时。
+当 `--debug true`（或 `--debug 1`）时，程序会在普通前向阶段输出注意力耗时和阶段总耗时；当 `--debug false`（或 `--debug 0`）时关闭阶段耗时统计。若同时使用 `--cuda-graph true`，整体 `fps` 来自 CUDA Graph，阶段耗时来自随后自动执行的普通前向调试阶段。
 
 ## 二、BiFormer-T 的 CUDA Graph 命令
 
@@ -41,7 +41,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_biformer_t.
 
 ## 三、PVSA 公平基准测速
 
-### PVSA CUDA Graph 公平测速
+### PVSA 普通前向公平测速
 
 ```bash
 export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
@@ -66,7 +66,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_pvsa.py \
 
 PVSA 的统一公平基准使用 `tools/analysis_tools/compare/pvsa_fair_timer.py` 统计 `PA` 注意力模块和阶段外层总耗时；原始测速入口仍然保留，不影响原有测试方法。结果表中的 PVSA 阶段数据应统一来自该公平基准，不要与原始入口的旧版调试输出混用。
 
-本说明统一使用 `--cuda-graph true`。PVSA 必须设置 `model.backbone.topp_flash_backend=cuda`，并确认自定义 CUDA 扩展已经编译完成；如果扩展不可用，才改用 `--cuda-graph false`。开启图内阶段计时还要求当前 PyTorch 支持 `torch.cuda.Event(external=True)`；不支持时程序会保留干净 CUDA Graph 的 FPS，并明确回退到普通前向输出阶段调试数据，不会把回退结果当作 CUDA Graph 阶段耗时。
+本说明统一使用 `--cuda-graph true`。PVSA 必须设置 `model.backbone.topp_flash_backend=cuda`，并确认自定义 CUDA 扩展已经编译完成；如果扩展不可用，才改用 `--cuda-graph false`。
 
 ## 四、BiFormer-T，支持 S、B（更换字母）
 
@@ -78,7 +78,7 @@ python tools/train.py \
   --work-dir work_dirs/compare/biformer_t
 ```
 
-### CUDA Graph 测速与阶段耗时命令
+### 普通前向测速与阶段耗时命令
 
 ```bash
 python tools/analysis_tools/compare/benchmark_biformer_t.py \
@@ -91,7 +91,7 @@ python tools/analysis_tools/compare/benchmark_biformer_t.py \
   --debug true \
   --debug-interval 100 \
   --cudnn-benchmark \
-  --output work_dirs/compare/biformer_t/fps_attention_cuda_graph.json
+  --output work_dirs/compare/biformer_t/fps_attention.json
 ```
 
 测试 BiFormer-S、BiFormer-B 时，将配置文件、测速脚本和结果目录中的 `t` 分别替换为 `s`、`b`。
@@ -106,7 +106,7 @@ python tools/train.py \
   --work-dir work_dirs/compare/swin_t
 ```
 
-### CUDA Graph 测速与阶段耗时命令
+### 普通前向测速与阶段耗时命令
 
 ```bash
 python tools/analysis_tools/compare/benchmark_swin_t.py \
@@ -119,7 +119,7 @@ python tools/analysis_tools/compare/benchmark_swin_t.py \
   --debug true \
   --debug-interval 100 \
   --cudnn-benchmark \
-  --output work_dirs/compare/swin_t/fps_attention_cuda_graph.json
+  --output work_dirs/compare/swin_t/fps_attention.json
 ```
 
 测试 Swin-S、Swin-B 时，将配置文件、测速脚本和结果目录中的 `t` 分别替换为 `s`、`b`。
@@ -134,7 +134,7 @@ python tools/train.py \
   --work-dir work_dirs/compare/vit_t
 ```
 
-### CUDA Graph 测速与阶段耗时命令
+### 普通前向测速与阶段耗时命令
 
 ```bash
 python tools/analysis_tools/compare/benchmark_vit_t.py \
@@ -147,7 +147,7 @@ python tools/analysis_tools/compare/benchmark_vit_t.py \
   --debug true \
   --debug-interval 100 \
   --cudnn-benchmark \
-  --output work_dirs/compare/vit_t/fps_attention_cuda_graph.json
+  --output work_dirs/compare/vit_t/fps_attention.json
 ```
 
 测试 ViT-S、ViT-B 时，将配置文件、测速脚本和结果目录中的 `t` 分别替换为 `s`、`b`。
@@ -157,14 +157,12 @@ python tools/analysis_tools/compare/benchmark_vit_t.py \
 阶段调试输出示例：
 
 ```text
-[COMPARE-CUDA-GRAPH-ATTN] model=swin_tiny images=100 S1_attention=5.5716ms S1_total=8.2031ms S2_attention=7.4840ms S2_total=10.6420ms S3_attention=11.3162ms S3_total=15.0245ms S4_attention=1.2586ms S4_total=2.1137ms
+[COMPARE-ATTN] model=swin_tiny images=100 S1_attention=5.5716ms S1_total=8.2031ms S2_attention=7.4840ms S2_total=10.6420ms S3_attention=11.3162ms S3_total=15.0245ms S4_attention=1.2586ms S4_total=2.1137ms
 ```
 
 其中：
 
 - `S1`、`S2`、`S3`、`S4`：对应阶段所有注意力模块的平均耗时；
-- CUDA Graph 模式下，`attention_reports` 来自带图内事件的 Graph 重放，不再来自普通前向；
-- `graph_attention_profile` 保存带计时事件的 Graph 吞吐结果，仅用于计时校验，不作为干净 Graph 的最终 FPS；
 - `S1_total`、`S2_total`、`S3_total`、`S4_total`：对应阶段外层总耗时；
 - 对比模型的阶段总耗时包含卷积下采样和 Transformer Block；
 - PVSA 的阶段总耗时包含 CNN 分支、Transformer 下采样、Transformer Block 和 FAM，不包含后置跨阶段融合、输出归一化与解码头；

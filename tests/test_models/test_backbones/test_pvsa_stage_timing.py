@@ -54,14 +54,6 @@ def test_pvsa_fair_timer_reports_attention_and_outer_stage_total():
     assert '_make_total_pre_hook' in source
     assert '_make_total_post_hook' in source
     assert 'downsample_layers2' in source
-    assert 'consume_graph_replay' in source
-    assert 'external=True' in source
-
-    benchmark_source = (root / 'tools' / 'analysis_tools' / 'compare' /
-                        'benchmark_compare.py').read_text(encoding='utf-8')
-    assert 'capture_timing=True' in benchmark_source
-    assert 'graph_attention_profile' in benchmark_source
-    assert 'eager-fallback' in benchmark_source
 
     backbone = _Backbone().eval()
     timer = PVSAFairStageTimer(backbone, model_name='test_pvsa', interval=1)
