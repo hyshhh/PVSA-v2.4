@@ -27,6 +27,8 @@ def test_tensorrt_plugin_sources_are_self_contained():
     assert "IPluginV2DynamicExt" in plugin
     assert "buildSerializedNetwork" in builder
     assert "addPluginV2" in builder
+    assert "getCreator" in builder
+    assert "release_builder_object" in builder
     assert "pvsa_build_plugin_engine" in cmake
     assert "TENSORRT_INCLUDE_DIR" in cmake
     assert "TENSORRT_LIBRARY" in cmake

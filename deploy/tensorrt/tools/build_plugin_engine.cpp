@@ -158,7 +158,23 @@ nvinfer1::Dims make_dims(std::initializer_list<int32_t> values) {
   return dims;
 }
 
-nvinfer1::IPluginV2* create_route_plugin(nvinfer1::IPluginRegistry* registry,
+nvinfer1::IPluginCreator* find_plugin_creator(
+    nvinfer1::IBuilder* builder, const char* name) {
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+  auto* registry = nvinfer1::getPluginRegistry();
+  return registry == nullptr ? nullptr
+                             : registry->getPluginCreator(name, "1", "");
+#else
+  if (builder == nullptr) {
+    return nullptr;
+  }
+  auto* creator_interface =
+      builder->getPluginRegistry().getCreator(name, "1", "");
+  return dynamic_cast<nvinfer1::IPluginCreator*>(creator_interface);
+#endif
+}
+
+nvinfer1::IPluginV2* create_route_plugin(nvinfer1::IPluginCreator* creator,
                                          const Options& options) {
   int32_t full_route = 0;
   nvinfer1::PluginField fields[] = {
@@ -173,13 +189,12 @@ nvinfer1::IPluginV2* create_route_plugin(nvinfer1::IPluginRegistry* registry,
   };
   nvinfer1::PluginFieldCollection collection{
       static_cast<int>(sizeof(fields) / sizeof(fields[0])), fields};
-  auto* creator = registry->getPluginCreator("PVSA_TopP_Route", "1", "");
   return creator == nullptr
              ? nullptr
              : creator->createPlugin("pvsa_route", &collection);
 }
 
-nvinfer1::IPluginV2* create_flash_plugin(nvinfer1::IPluginRegistry* registry,
+nvinfer1::IPluginV2* create_flash_plugin(nvinfer1::IPluginCreator* creator,
                                          const Options& options) {
   const int32_t use_route_weight = options.use_route_weight ? 1 : 0;
   nvinfer1::PluginField fields[] = {
@@ -195,7 +210,6 @@ nvinfer1::IPluginV2* create_flash_plugin(nvinfer1::IPluginRegistry* registry,
   };
   nvinfer1::PluginFieldCollection collection{
       static_cast<int>(sizeof(fields) / sizeof(fields[0])), fields};
-  auto* creator = registry->getPluginCreator("PVSA_TopP_Flash", "1", "");
   return creator == nullptr
              ? nullptr
              : creator->createPlugin("pvsa_flash", &collection);
@@ -216,6 +230,19 @@ bool check_options(const Options& options) {
     return false;
   }
   return true;
+}
+
+template <typename T>
+void release_builder_object(T*& object) {
+  if (object == nullptr) {
+    return;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  delete object;
+#else
+  object->destroy();
+#endif
+  object = nullptr;
 }
 
 bool write_engine(const std::string& path, nvinfer1::IHostMemory* serialized) {
@@ -255,15 +282,18 @@ int main(int argc, char** argv) {
     std::cerr << "创建 TensorRT 构建器失败。\n";
     return 1;
   }
-  auto* network = builder->createNetworkV2(
-      1U << static_cast<uint32_t>(
-          nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
+  uint32_t network_flags = 0U;
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+  network_flags = 1U << static_cast<uint32_t>(
+      nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+#endif
+  auto* network = builder->createNetworkV2(network_flags);
   auto* config = builder->createBuilderConfig();
   if (network == nullptr || config == nullptr) {
     std::cerr << "创建 TensorRT 网络或构建配置失败。\n";
-    if (config != nullptr) config->destroy();
-    if (network != nullptr) network->destroy();
-    builder->destroy();
+    release_builder_object(config);
+    release_builder_object(network);
+    release_builder_object(builder);
     return 1;
   }
 
@@ -290,23 +320,24 @@ int main(int argc, char** argv) {
                  options.qk_dim + options.dim}));
   if (query == nullptr || key == nullptr || q_pix == nullptr || kv_pix == nullptr) {
     std::cerr << "创建网络输入失败。\n";
-    config->destroy();
-    network->destroy();
-    builder->destroy();
+    release_builder_object(config);
+    release_builder_object(network);
+    release_builder_object(builder);
     return 1;
   }
 
-  auto* registry = nvinfer1::getPluginRegistry();
-  auto* route_plugin = create_route_plugin(registry, options);
-  auto* flash_plugin = create_flash_plugin(registry, options);
+  auto* route_creator = find_plugin_creator(builder, "PVSA_TopP_Route");
+  auto* flash_creator = find_plugin_creator(builder, "PVSA_TopP_Flash");
+  auto* route_plugin = create_route_plugin(route_creator, options);
+  auto* flash_plugin = create_flash_plugin(flash_creator, options);
   if (route_plugin == nullptr || flash_plugin == nullptr) {
     std::cerr << "找不到 PVSA 插件创建器。请确认已加载"
                  " libpvsa_tensorrt_plugins.so。\n";
     if (route_plugin != nullptr) route_plugin->destroy();
     if (flash_plugin != nullptr) flash_plugin->destroy();
-    config->destroy();
-    network->destroy();
-    builder->destroy();
+    release_builder_object(config);
+    release_builder_object(network);
+    release_builder_object(builder);
     return 1;
   }
 
@@ -314,9 +345,9 @@ int main(int argc, char** argv) {
   auto* route_layer = network->addPluginV2(route_inputs, 2, *route_plugin);
   if (route_layer == nullptr) {
     std::cerr << "添加 PVSA_TopP_Route 插件层失败。\n";
-    config->destroy();
-    network->destroy();
-    builder->destroy();
+    release_builder_object(config);
+    release_builder_object(network);
+    release_builder_object(builder);
     return 1;
   }
   route_layer->getOutput(0)->setName("route_weight");
@@ -329,9 +360,9 @@ int main(int argc, char** argv) {
   auto* flash_layer = network->addPluginV2(flash_inputs, 5, *flash_plugin);
   if (flash_layer == nullptr) {
     std::cerr << "添加 PVSA_TopP_Flash 插件层失败。\n";
-    config->destroy();
-    network->destroy();
-    builder->destroy();
+    release_builder_object(config);
+    release_builder_object(network);
+    release_builder_object(builder);
     return 1;
   }
   flash_layer->getOutput(0)->setName("attention_output");
@@ -340,10 +371,10 @@ int main(int argc, char** argv) {
   nvinfer1::IHostMemory* serialized =
       builder->buildSerializedNetwork(*network, *config);
   const bool success = write_engine(options.output, serialized);
-  if (serialized != nullptr) serialized->destroy();
-  config->destroy();
-  network->destroy();
-  builder->destroy();
+  release_builder_object(serialized);
+  release_builder_object(config);
+  release_builder_object(network);
+  release_builder_object(builder);
   if (!success) {
     std::cerr << "构建 TensorRT 引擎失败。\n";
     return 1;

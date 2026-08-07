@@ -16,13 +16,8 @@ option(PVSA_TRT_FAST_MATH "Enable CUDA fast math for deployment performance" OFF
 
 find_package(CUDAToolkit REQUIRED)
 
-if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.0" AND
-   CMAKE_CXX_COMPILER_VERSION VERSION_LESS "12.0")
-  message(WARNING
-          "CUDA ${CMAKE_CUDA_COMPILER_VERSION} 使用了 GCC "
-          "${CMAKE_CXX_COMPILER_VERSION}；如果出现 "
-          "__builtin_dynamic_object_size 错误，请使用 g++-12 或更高版本，"
-          "并传入 -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12")
+if(CMAKE_CUDA_HOST_COMPILER)
+  message(STATUS "CUDA host compiler: ${CMAKE_CUDA_HOST_COMPILER}")
 endif()
 
 # 支持三种安装方式：
