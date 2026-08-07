@@ -72,20 +72,16 @@ fps 测速、阶段耗时分析、CUDA Graph 高吞吐推理见 **`FPS.md`**。
 
 ## TensorRT 部署
 
-当前版本已经提供 PVSA Top-p 路由和 Flash Attention 的 TensorRT 插件化实现，
-插件源码和编译说明位于：
+当前版本提供 PVSA Top-p 路由和 Flash Attention 的 TensorRT 插件化实现。
+
+完整的环境准备、插件编译、冒烟引擎构建、运行时加载、完整网络接入和数值验证说明见：
+
+```text
+deploy_readme.md
+```
+
+插件源码级接口和编译配置见：
 
 ```text
 deploy/tensorrt/
 ```
-
-第一版插件支持固定输入、batch=1、FP32、`n_win=7` 和 `topk<=49`，
-具体限制、编译方法和接入方式见：
-
-```text
-deploy/tensorrt/README.md
-```
-
-TensorRT 插件不依赖 PyTorch 运行时，但实际构建需要 Linux、CUDA 和 TensorRT
-开发环境。当前插件先用于固定形状和数值一致性验证，FP16、INT8、动态输入和
-融合路由插件将在验证通过后继续扩展。
