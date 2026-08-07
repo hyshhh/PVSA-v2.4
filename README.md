@@ -1,11 +1,11 @@
-# PVSA-Net
+# PVSA-Net v3.0
 
 ## 训练
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
   --cfg-options model.backbone.topp_flash_backend=None model.backbone.feature_vis_config.enabled=False model.backbone.attn_vis_config.enabled=False train_dataloader.batch_size=16 \
-  --work-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA
+  --work-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v3.0/work_dirs/PVSA
 ```
 
 ## 推理并保存分割结果
@@ -15,11 +15,11 @@ CUDA_VISIBLE_DEVICES=0 python tools/train.py configs-h/biformer/biformer_mm-20k_
 ### 原始路径推理（torch）
 
 ```bash
-export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v3.0:$PYTHONPATH
 CUDA_VISIBLE_DEVICES=0 python tools/test.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth  \
-  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/vis_results/gqy \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v3.0/work_dirs/PVSA/epoch_10.pth  \
+  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v3.0/vis_results/gqy \
   --cfg-options model.backbone.topp_flash_backend=None \
   --input-size 224 224 \
   --cudnn-benchmark
@@ -28,13 +28,13 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py \
 ### 自定义 CUDA 核推理
 
 ```bash
-export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v3.0:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/test.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth  \
-  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/vis_results/2 \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v3.0/work_dirs/PVSA/epoch_10.pth  \
+  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v3.0/vis_results/2 \
   --cfg-options model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=false \
   --input-size 224 224 \
@@ -48,13 +48,13 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py \
 predict 一致）。predict 后处理在图外执行但计入流程。
 
 ```bash
-export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v3.0:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 CUDA_VISIBLE_DEVICES=0 python tools/test.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/work_dirs/PVSA/epoch_10.pth  \
-  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v2.4/vis_results/3 \
+  /media/ddc/新加卷/hys/hysnew3/PVSA-v3.0/work_dirs/PVSA/epoch_10.pth  \
+  --show-dir /media/ddc/新加卷/hys/hysnew3/PVSA-v3.0/vis_results/3 \
   --cfg-options model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=false \
   --input-size 224 224 \
@@ -69,3 +69,23 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py \
 ## FPS 测速
 
 fps 测速、阶段耗时分析、CUDA Graph 高吞吐推理见 **`FPS.md`**。
+
+## TensorRT 部署
+
+当前版本已经提供 PVSA Top-p 路由和 Flash Attention 的 TensorRT 插件化实现，
+插件源码和编译说明位于：
+
+```text
+deploy/tensorrt/
+```
+
+第一版插件支持固定输入、batch=1、FP32、`n_win=7` 和 `topk<=49`，
+具体限制、编译方法和接入方式见：
+
+```text
+deploy/tensorrt/README.md
+```
+
+TensorRT 插件不依赖 PyTorch 运行时，但实际构建需要 Linux、CUDA 和 TensorRT
+开发环境。当前插件先用于固定形状和数值一致性验证，FP16、INT8、动态输入和
+融合路由插件将在验证通过后继续扩展。

@@ -5,7 +5,7 @@
 以下命令在项目根目录执行。权重和结果目录可以按实际路径修改。本说明中的公平测速命令均不加载训练好的权重，使用随机初始化模型。
 
 ```bash
-cd /media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-v2.4
+cd /media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-v3.0
 export PYTHONPATH=$PWD:$PYTHONPATH
 export CUDA_VISIBLE_DEVICES=0
 export CC=/usr/bin/gcc-11
@@ -22,7 +22,7 @@ export CXX=/usr/bin/g++-11
 ## 二、BiFormer-T 的 CUDA Graph 命令
 
 ```bash
-export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v3.0:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 
@@ -44,7 +44,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/analysis_tools/compare/benchmark_biformer_t.
 ### PVSA 普通前向公平测速
 
 ```bash
-export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v2.4:$PYTHONPATH
+export PYTHONPATH=/media/ddc/新加卷/hys/hysnew3/PVSA-v3.0:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 
