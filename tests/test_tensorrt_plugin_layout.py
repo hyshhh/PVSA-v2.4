@@ -33,7 +33,7 @@ def test_tensorrt_plugin_sources_are_self_contained():
     assert "FP32" in readme
     assert "PVSA-Net v3.0" in root_readme
     assert "deploy_readme.md" in root_readme
-    assert "PVSA-Net v3.0 部署说明" in deploy_readme
+    assert "PVSA-Net v3.0 部署命令" in deploy_readme
     assert "PVSA_TopP_Route" in deploy_readme
     assert not any(line.endswith("\\\\") for line in deploy_readme.splitlines())
     assert "PVSA-v2.4" not in root_readme
