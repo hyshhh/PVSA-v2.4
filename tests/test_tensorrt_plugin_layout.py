@@ -28,6 +28,8 @@ def test_tensorrt_plugin_sources_are_self_contained():
     assert "buildSerializedNetwork" in builder
     assert "addPluginV2" in builder
     assert "pvsa_build_plugin_engine" in cmake
+    assert "TENSORRT_INCLUDE_DIR" in cmake
+    assert "TENSORRT_LIBRARY" in cmake
     assert "FP32" in readme
     assert "PVSA-Net v3.0" in root_readme
     assert "deploy_readme.md" in root_readme

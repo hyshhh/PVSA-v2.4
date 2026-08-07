@@ -112,8 +112,32 @@ GCC/G++ 与 CUDA 版本兼容
 ```bash
 nvcc --version
 cmake --version
-ls $TENSORRT_ROOT/include/NvInfer.h
-ls $TENSORRT_ROOT/lib/libnvinfer.so
+echo "TENSORRT_ROOT=${TENSORRT_ROOT}"
+test -f "${TENSORRT_ROOT}/include/NvInfer.h"
+test -f "${TENSORRT_ROOT}/lib/libnvinfer.so" || test -f "${TENSORRT_ROOT}/lib64/libnvinfer.so"
+```
+
+如果上述 `test` 报错，说明 `TENSORRT_ROOT` 不是实际的 TensorRT 开发包目录。可以先查找头文件和库文件：
+
+```bash
+find /usr/local /opt /usr -type f \
+  \( -name NvInfer.h -o -name "libnvinfer.so*" \) 2>/dev/null
+```
+
+正确的 TensorRT 根目录应当满足：
+
+```text
+<TENSORRT_ROOT>/include/NvInfer.h
+<TENSORRT_ROOT>/lib/libnvinfer.so   或   <TENSORRT_ROOT>/lib64/libnvinfer.so
+```
+
+如果 TensorRT 安装在 Debian/Ubuntu 的系统目录，也可以直接传入两个路径：
+
+```bash
+cmake -S deploy/tensorrt -B build/tensorrt \
+  -DTENSORRT_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
+  -DTENSORRT_LIBRARY=/usr/lib/x86_64-linux-gnu/libnvinfer.so \
+  -DCMAKE_CUDA_ARCHITECTURES=86
 ```
 
 如果显卡不是 `Ampere`，需要按照实际显卡修改 `CMAKE_CUDA_ARCHITECTURES`：
