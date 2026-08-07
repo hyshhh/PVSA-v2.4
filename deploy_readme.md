@@ -134,12 +134,18 @@ ls $TENSORRT_ROOT/lib/libnvinfer.so
 默认不启用 `--use_fast_math`，用于优先验证 TensorRT 输出与 PyTorch/CUDA 输出的一致性：
 
 ```bash
-cmake -S deploy/tensorrt \\
-  -B build/tensorrt \\
-  -DTENSORRT_ROOT=$TENSORRT_ROOT \\
+cmake -S deploy/tensorrt \
+  -B build/tensorrt \
+  -DTENSORRT_ROOT=$TENSORRT_ROOT \
   -DCMAKE_CUDA_ARCHITECTURES=86
 
 cmake --build build/tensorrt -j$(nproc)
+```
+
+注意：Bash 的多行命令续行符必须是**一个反斜杠** `\`，并且反斜杠后面不能再有空格或第二个反斜杠。如果不想使用多行写法，也可以直接执行：
+
+```bash
+cmake -S deploy/tensorrt -B build/tensorrt -DTENSORRT_ROOT="$TENSORRT_ROOT" -DCMAKE_CUDA_ARCHITECTURES=86
 ```
 
 编译产物：
@@ -154,10 +160,10 @@ build/tensorrt/pvsa_build_plugin_engine
 确认数值误差和分割指标满足要求后，可以启用快速数学优化：
 
 ```bash
-cmake -S deploy/tensorrt \\
-  -B build/tensorrt_fast \\
-  -DTENSORRT_ROOT=$TENSORRT_ROOT \\
-  -DCMAKE_CUDA_ARCHITECTURES=86 \\
+cmake -S deploy/tensorrt \
+  -B build/tensorrt_fast \
+  -DTENSORRT_ROOT=$TENSORRT_ROOT \
+  -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DPVSA_TRT_FAST_MATH=ON
 
 cmake --build build/tensorrt_fast -j$(nproc)
@@ -244,15 +250,15 @@ q_pix、kv_pix ─┴─> PVSA_TopP_Flash
 构建固定形状测试引擎：
 
 ```bash
-build/tensorrt/pvsa_build_plugin_engine \\
-  --output work_dirs/pvsa_plugin_smoke.engine \\
-  --batch 1 \\
-  --num-heads 8 \\
-  --qk-dim 256 \\
-  --dim 256 \\
-  --height 56 \\
-  --width 56 \\
-  --kv-len 64 \\
+build/tensorrt/pvsa_build_plugin_engine \
+  --output work_dirs/pvsa_plugin_smoke.engine \
+  --batch 1 \
+  --num-heads 8 \
+  --qk-dim 256 \
+  --dim 256 \
+  --height 56 \
+  --width 56 \
+  --kv-len 64 \
   --topk 8
 ```
 
@@ -303,11 +309,11 @@ PVSA_TopP_Flash
 ### 7.2 使用 `trtexec` 检查引擎
 
 ```bash
-trtexec \\
-  --loadEngine=work_dirs/pvsa_plugin_smoke.engine \\
-  --dumpLayerInfo \\
-  --profilingVerbosity=detailed \\
-  --warmUp=200 \\
+trtexec \
+  --loadEngine=work_dirs/pvsa_plugin_smoke.engine \
+  --dumpLayerInfo \
+  --profilingVerbosity=detailed \
+  --warmUp=200 \
   --iterations=1000
 ```
 
@@ -435,8 +441,8 @@ ls $TENSORRT_ROOT/include/NvInfer.h
 重新配置：
 
 ```bash
-cmake -S deploy/tensorrt \\
-  -B build/tensorrt \\
+cmake -S deploy/tensorrt \
+  -B build/tensorrt \
   -DTENSORRT_ROOT=$TENSORRT_ROOT
 ```
 
