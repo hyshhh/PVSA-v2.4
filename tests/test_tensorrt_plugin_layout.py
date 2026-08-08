@@ -29,6 +29,7 @@ def test_tensorrt_plugin_sources_are_self_contained():
     assert "addPluginV2" in builder
     assert "getCreator" in builder
     assert "getPluginRegistry()" in builder
+    assert "pvsa_tensorrt_plugins_anchor" in builder
     assert "release_builder_object" in builder
     assert "pvsa_build_plugin_engine" in cmake
     assert "TENSORRT_INCLUDE_DIR" in cmake

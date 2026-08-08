@@ -817,3 +817,5 @@ REGISTER_TENSORRT_PLUGIN(TopPRouteCreator);
 REGISTER_TENSORRT_PLUGIN(TopPFlashCreator);
 
 }  // namespace pvsa_tensorrt
+
+extern "C" void pvsa_tensorrt_plugins_anchor() noexcept {}

@@ -11,6 +11,8 @@
 #include <type_traits>
 #include <vector>
 
+extern "C" void pvsa_tensorrt_plugins_anchor() noexcept;
+
 namespace {
 
 class Logger final : public nvinfer1::ILogger {
@@ -262,6 +264,8 @@ bool write_engine(const std::string& path, nvinfer1::IHostMemory* serialized) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // 强制加载插件动态库，确保 REGISTER_TENSORRT_PLUGIN 完成注册。
+  pvsa_tensorrt_plugins_anchor();
   Options options;
   if (!parse_options(argc, argv, &options)) {
     return argc > 1 && (std::string(argv[1]) == "--help" ||
