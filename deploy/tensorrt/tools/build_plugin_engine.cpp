@@ -161,7 +161,7 @@ nvinfer1::Dims make_dims(std::initializer_list<int32_t> values) {
 nvinfer1::IPluginCreator* find_plugin_creator(
     nvinfer1::IBuilder* builder, const char* name) {
 #if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
-  auto* registry = nvinfer1::getPluginRegistry();
+  auto* registry = getPluginRegistry();
   return registry == nullptr ? nullptr
                              : registry->getPluginCreator(name, "1", "");
 #else
