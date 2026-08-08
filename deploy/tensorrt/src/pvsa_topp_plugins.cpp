@@ -194,7 +194,7 @@ nvinfer1::DimsExprs TopPRoutePlugin::getOutputDimensions(
   return output;
 }
 
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
 nvinfer1::Dims TopPRoutePlugin::getOutputDimensions(
     int output_index, const nvinfer1::Dims* inputs, int nb_inputs) noexcept {
   if (inputs == nullptr || nb_inputs != kRouteInputCount) {
@@ -227,7 +227,7 @@ void TopPRoutePlugin::configurePlugin(
   (void)nb_outputs;
 }
 
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
 void TopPRoutePlugin::configureWithFormat(
     const nvinfer1::PluginTensorDesc* in, int nb_inputs,
     const nvinfer1::PluginTensorDesc* out, int nb_outputs,
@@ -431,7 +431,7 @@ nvinfer1::DimsExprs TopPFlashPlugin::getOutputDimensions(
   return output;
 }
 
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
 nvinfer1::Dims TopPFlashPlugin::getOutputDimensions(
     int output_index, const nvinfer1::Dims* inputs, int nb_inputs) noexcept {
   if (inputs == nullptr || nb_inputs != kFlashInputCount || output_index != 0) {
@@ -470,7 +470,7 @@ void TopPFlashPlugin::configurePlugin(
   (void)nb_outputs;
 }
 
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
 void TopPFlashPlugin::configureWithFormat(
     const nvinfer1::PluginTensorDesc* in, int nb_inputs,
     const nvinfer1::PluginTensorDesc* out, int nb_outputs,

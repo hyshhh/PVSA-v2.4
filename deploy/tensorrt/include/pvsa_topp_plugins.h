@@ -18,7 +18,7 @@ public:
   nvinfer1::DimsExprs getOutputDimensions(
       int outputIndex, const nvinfer1::DimsExprs* inputs, int nbInputs,
       nvinfer1::IExprBuilder& exprBuilder) noexcept override;
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
   nvinfer1::Dims getOutputDimensions(
       int outputIndex, const nvinfer1::Dims* inputs,
       int nbInputs) noexcept override;
@@ -30,7 +30,7 @@ public:
                        int nbInputs,
                        const nvinfer1::DynamicPluginTensorDesc* out,
                        int nbOutputs) noexcept override;
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
   void configureWithFormat(const nvinfer1::PluginTensorDesc* in, int nbInputs,
                            const nvinfer1::PluginTensorDesc* out,
                            int nbOutputs, nvinfer1::DataType type,
@@ -90,7 +90,7 @@ public:
   nvinfer1::DimsExprs getOutputDimensions(
       int outputIndex, const nvinfer1::DimsExprs* inputs, int nbInputs,
       nvinfer1::IExprBuilder& exprBuilder) noexcept override;
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
   nvinfer1::Dims getOutputDimensions(
       int outputIndex, const nvinfer1::Dims* inputs,
       int nbInputs) noexcept override;
@@ -102,7 +102,7 @@ public:
                        int nbInputs,
                        const nvinfer1::DynamicPluginTensorDesc* out,
                        int nbOutputs) noexcept override;
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
   void configureWithFormat(const nvinfer1::PluginTensorDesc* in, int nbInputs,
                            const nvinfer1::PluginTensorDesc* out,
                            int nbOutputs, nvinfer1::DataType type,
