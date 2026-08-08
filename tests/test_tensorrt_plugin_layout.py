@@ -39,6 +39,10 @@ def test_tensorrt_plugin_sources_are_self_contained():
     assert "deploy_readme.md" in root_readme
     assert "PVSA-Net v3.0 部署命令" in deploy_readme
     assert "PVSA_TopP_Route" in deploy_readme
+    assert "build/tensorrt/" in deploy_readme
+    assert "build/tensorrt_fast/" in deploy_readme
+    assert "build/tensorrt/pvsa_build_plugin_engine" in deploy_readme
+    assert "build/tensorrt_fast/pvsa_build_plugin_engine" in deploy_readme
     assert not any(line.endswith("\\\\") for line in deploy_readme.splitlines())
     assert "PVSA-v2.4" not in root_readme
     assert "PVSA-v2.4" not in deploy_readme
