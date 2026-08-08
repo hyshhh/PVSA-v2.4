@@ -128,6 +128,7 @@ build/tensorrt_fast/pvsa_build_plugin_engine \
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
 "$TRT_ROOT/bin/trtexec" \
+  --plugins="$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so" \
   --loadEngine=work_dirs/pvsa_plugin_smoke.engine \
   --dumpLayerInfo --profilingVerbosity=detailed --warmUp=200 --iterations=1000
 ```
@@ -136,6 +137,18 @@ CUDA_VISIBLE_DEVICES=1 \
 
 ```text
 work_dirs/pvsa_plugin_smoke_fast.engine
+```
+
+运行包含 PVSA 自定义插件的引擎时，必须显式加载插件动态库：
+
+```bash
+--plugins="$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so"
+```
+
+快速版将路径替换为：
+
+```text
+$PWD/build/tensorrt_fast/libpvsa_tensorrt_plugins.so
 ```
 
 ## 8. 接入接口

@@ -53,6 +53,8 @@ def test_tensorrt_plugin_sources_are_self_contained():
     assert "libcudnn.so.8" in deploy_readme
     assert "CUDNN_ROOT" in readme
     assert "libcudnn.so.8" in readme
+    assert "--plugins=\"$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so\"" in deploy_readme
+    assert "--plugins=\"$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so\"" in readme
     assert "CUDACXX=/usr/bin/nvcc" in deploy_readme
     assert "-DCMAKE_CUDA_COMPILER=/usr/bin/nvcc" in deploy_readme
     assert "/usr/local/cuda-12.0" not in deploy_readme

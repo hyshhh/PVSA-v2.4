@@ -165,6 +165,7 @@ build/tensorrt_fast/pvsa_build_plugin_engine \
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
 "$TRT_ROOT/bin/trtexec" \
+  --plugins="$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so" \
   --loadEngine=work_dirs/pvsa_plugin_smoke.engine \
   --dumpLayerInfo \
   --profilingVerbosity=detailed \
@@ -177,12 +178,21 @@ CUDA_VISIBLE_DEVICES=1 \
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
 "$TRT_ROOT/bin/trtexec" \
+  --plugins="$PWD/build/tensorrt_fast/libpvsa_tensorrt_plugins.so" \
   --loadEngine=work_dirs/pvsa_plugin_smoke_fast.engine \
   --dumpLayerInfo \
   --profilingVerbosity=detailed \
   --warmUp=200 \
   --iterations=1000
 ```
+
+运行包含自定义插件的引擎时，必须通过 `--plugins` 显式加载插件动态库：
+
+```bash
+--plugins="$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so"
+```
+
+否则 `trtexec` 反序列化引擎时找不到 `PVSA_TopP_Route` 和 `PVSA_TopP_Flash`。
 
 ## 9. 插件接口与限制
 
