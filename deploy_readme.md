@@ -1,45 +1,77 @@
 # PVSA-Net v3.0 部署命令
 
-## 1. 环境
+## 1. 设置环境
 
 ```bash
 cd /media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-v3.0
 
+export CUDA_HOME=/usr/local/cuda-12.0
+export TRT_ROOT=$HOME/opt/TensorRT-8.6.1.6
 export PYTHONPATH=$PWD:$PYTHONPATH
-export CUDA_HOME=/usr/local/cuda
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
-command -v g++-12 || sudo apt-get install gcc-12 g++-12
-export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+export PATH=$TRT_ROOT/bin:$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$TRT_ROOT/lib:$CUDA_HOME/lib64:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 ```
 
-## 2. 检查依赖
+检查 CUDA：
 
 ```bash
 nvcc --version
 cmake --version
-ls -lh /usr/include/x86_64-linux-gnu/NvInfer.h
-ls -lh /usr/lib/x86_64-linux-gnu/libnvinfer.so.11.2.1
 ```
 
-如果路径不同：
+## 2. 卸载 CUDA 13 TensorRT
+
+只卸载已安装的 TensorRT 相关软件包，不要使用不存在的 `libnvparsers*` 软件包名：
 
 ```bash
-find /usr/local /opt /usr -type f \
-  \( -name NvInfer.h -o -name "libnvinfer.so*" \) 2>/dev/null
+dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' | awk '$2=="installed" && $1 ~ /^(tensorrt|libnvinfer|libnvonnxparsers|python3-libnvinfer)/ {print $1}' | xargs -r sudo apt-get purge -y
+sudo apt-get autoremove -y
+sudo ldconfig
 ```
 
-## 3. 配置并编译普通版
+## 3. 下载并解压 CUDA 12.0 对应的 TensorRT
 
-普通版不启用快速数学，先用于数值一致性验证。
+TensorRT 压缩包需要从 NVIDIA 官方页面下载。登录后下载：
+
+```text
+TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz
+```
+
+如果下载链接可直接访问：
+
+```bash
+wget -O /tmp/TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/secure/8.6.1/tars/TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz" && mkdir -p "$HOME/opt" && tar -xzf /tmp/TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz -C "$HOME/opt"
+```
+
+如果 `wget` 返回 `403`，请在浏览器下载后执行：
+
+```bash
+mkdir -p "$HOME/opt"
+tar -xzf ~/Downloads/TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz -C "$HOME/opt"
+```
+
+检查 TensorRT 文件：
+
+```bash
+ls -lh "$TRT_ROOT/include/NvInfer.h"
+ls -lh "$TRT_ROOT/lib/libnvinfer.so"
+ls -lh "$TRT_ROOT/bin/trtexec"
+```
+
+## 4. 编译普通版
+
+普通版不启用快速数学，用于先验证数值一致性。
 
 ```bash
 rm -rf build/tensorrt
 
 cmake -S deploy/tensorrt \
   -B build/tensorrt \
-  -DTENSORRT_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
-  -DTENSORRT_LIBRARY=/usr/lib/x86_64-linux-gnu/libnvinfer.so.11.2.1 \
+  -DTENSORRT_INCLUDE_DIR="$TRT_ROOT/include" \
+  -DTENSORRT_LIBRARY="$TRT_ROOT/lib/libnvinfer.so" \
+  -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12
 
@@ -53,17 +85,16 @@ ls -lh build/tensorrt/libpvsa_tensorrt_plugins.so
 ls -lh build/tensorrt/pvsa_build_plugin_engine
 ```
 
-## 4. 配置并编译快速版
-
-快速版启用 `--use_fast_math`，用于性能测试；产物与普通版分开保存。
+## 5. 编译快速版
 
 ```bash
 rm -rf build/tensorrt_fast
 
 cmake -S deploy/tensorrt \
   -B build/tensorrt_fast \
-  -DTENSORRT_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
-  -DTENSORRT_LIBRARY=/usr/lib/x86_64-linux-gnu/libnvinfer.so.11.2.1 \
+  -DTENSORRT_INCLUDE_DIR="$TRT_ROOT/include" \
+  -DTENSORRT_LIBRARY="$TRT_ROOT/lib/libnvinfer.so" \
+  -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 \
   -DPVSA_TRT_FAST_MATH=ON
@@ -78,13 +109,14 @@ ls -lh build/tensorrt_fast/libpvsa_tensorrt_plugins.so
 ls -lh build/tensorrt_fast/pvsa_build_plugin_engine
 ```
 
-## 5. 构建插件测试引擎
+## 6. 构建插件测试引擎
 
-默认使用普通版：
+`86` 对应 RTX A6000。GPU 2 当前负载较高，优先使用 GPU 1：
 
 ```bash
 mkdir -p work_dirs
 
+CUDA_VISIBLE_DEVICES=1 \
 build/tensorrt/pvsa_build_plugin_engine \
   --output work_dirs/pvsa_plugin_smoke.engine \
   --batch 1 \
@@ -97,9 +129,10 @@ build/tensorrt/pvsa_build_plugin_engine \
   --topk 8
 ```
 
-快速版只需替换可执行文件：
+快速版：
 
 ```bash
+CUDA_VISIBLE_DEVICES=1 \
 build/tensorrt_fast/pvsa_build_plugin_engine \
   --output work_dirs/pvsa_plugin_smoke_fast.engine \
   --batch 1 \
@@ -112,14 +145,13 @@ build/tensorrt_fast/pvsa_build_plugin_engine \
   --topk 8
 ```
 
-## 6. 使用 `trtexec` 测试
+## 7. 使用 `trtexec` 测试
 
 普通版：
 
 ```bash
-export LD_LIBRARY_PATH=$PWD/build/tensorrt:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
-
-trtexec \
+CUDA_VISIBLE_DEVICES=1 \
+"$TRT_ROOT/bin/trtexec" \
   --loadEngine=work_dirs/pvsa_plugin_smoke.engine \
   --dumpLayerInfo \
   --profilingVerbosity=detailed \
@@ -130,9 +162,8 @@ trtexec \
 快速版：
 
 ```bash
-export LD_LIBRARY_PATH=$PWD/build/tensorrt_fast:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
-
-trtexec \
+CUDA_VISIBLE_DEVICES=1 \
+"$TRT_ROOT/bin/trtexec" \
   --loadEngine=work_dirs/pvsa_plugin_smoke_fast.engine \
   --dumpLayerInfo \
   --profilingVerbosity=detailed \
@@ -140,7 +171,7 @@ trtexec \
   --iterations=1000
 ```
 
-## 7. 插件接口与限制
+## 8. 插件接口与限制
 
 ```text
 PVSA_TopP_Route
@@ -163,17 +194,11 @@ H、W：必须能被 7 整除
 topk：1 到 49
 ```
 
-完整网络接入顺序：
-
-```text
-输入 -> QKV 投影 -> 窗口重排 -> PVSA_TopP_Route
-     -> PVSA_TopP_Flash -> 输出投影 -> 裁剪 -> 解码头
-```
-
 TensorRT 反序列化引擎前必须加载：
 
 ```text
-libpvsa_tensorrt_plugins.so
+$TRT_ROOT/lib/libnvinfer.so
+build/tensorrt/libpvsa_tensorrt_plugins.so
 ```
 
 插件源码：
