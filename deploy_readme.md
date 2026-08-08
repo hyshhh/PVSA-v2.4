@@ -233,74 +233,84 @@ deploy/tensorrt/tools/build_plugin_engine.cpp
 deploy/tensorrt/CMakeLists.txt
 ```
 
-## 10. 完整 PVSA 框架测速
+## 10. 完整 PVSA TensorRT 框架测速
 
-`pvsa_build_plugin_engine` 只用于插件冒烟测试。完整模型测速使用项目自带的
-`tools/analysis_tools/benchmark.py`，包含完整主干、解码头和预测流程；该流程不加载训练权重，仅使用随机初始化参数测试完整框架速度；不用于精度验证。
-
-```bash
-export PYTHONPATH=$PWD:$PYTHONPATH
-```
-
-普通完整框架测速：
-
-```bash
-CUDA_VISIBLE_DEVICES=1 \
-python tools/analysis_tools/benchmark.py \
-  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --no-checkpoint \
-  --cfg-options \
-  model.backbone.topp_flash_backend=None \
-  model.backbone.topp_flash_debug=false \
-  --input-size 256 256 \
-  --batch-size 1 \
-  --repeat-times 5 \
-  --cudnn-benchmark \
-  --work-dir work_dirs/benchmark/full_framework_eager
-```
-
-完整框架 CUDA 核测速：
-
-```bash
-CUDA_VISIBLE_DEVICES=1 \
-python tools/analysis_tools/benchmark.py \
-  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --no-checkpoint \
-  --cfg-options \
-  model.backbone.topp_flash_backend=cuda \
-  model.backbone.topp_flash_debug=false \
-  --input-size 256 256 \
-  --batch-size 1 \
-  --repeat-times 5 \
-  --cudnn-benchmark \
-  --work-dir work_dirs/benchmark/full_framework_cuda
-```
-
-完整框架 CUDA Graph 测速：
-
-```bash
-CUDA_VISIBLE_DEVICES=1 \
-python tools/analysis_tools/benchmark.py \
-  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  --no-checkpoint \
-  --cfg-options \
-  model.backbone.topp_flash_backend=cuda \
-  model.backbone.topp_flash_debug=false \
-  --input-size 256 256 \
-  --batch-size 1 \
-  --repeat-times 5 \
-  --cudnn-benchmark \
-  --cuda-graph \
-  --work-dir work_dirs/benchmark/full_framework_cuda_graph
-```
-
-输出重点查看：
+完整部署的正确流程是：
 
 ```text
-Overall fps
-Average fps of 5 evaluations
-The variance of 5 evaluations
+完整 PVSA 模型 -> 固定形状 ONNX -> TensorRT 完整引擎 -> trtexec 测速
 ```
 
-`--cuda-graph` 要求固定输入尺寸，并且必须使用 `topp_flash_backend=cuda`。
-完整框架测速结果与 TensorRT 插件冒烟测速结果分开记录，不要将后者的吞吐率作为完整 PVSA 网络的 FPS。
+完整引擎需要包含主干、PVSA 模块、输出投影和解码头，并且 ONNX 中的 PVSA 自定义节点必须映射到：
+
+```text
+PVSA_TopP_Route
+PVSA_TopP_Flash
+```
+
+### 10.1 构建完整 TensorRT 引擎
+
+以下命令以已经生成的完整模型文件为例：
+
+```bash
+export FULL_ONNX=work_dirs/pvsa_full.onnx
+export FULL_ENGINE=work_dirs/pvsa_full.engine
+
+CUDA_VISIBLE_DEVICES=1 \
+"$TRT_ROOT/bin/trtexec" \
+  --onnx="$FULL_ONNX" \
+  --staticPlugins="$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so" \
+  --saveEngine="$FULL_ENGINE" \
+  --verbose
+```
+
+固定输入尺寸的 ONNX 不需要额外设置动态形状；动态输入则必须补充对应的形状配置。
+首次部署建议使用 FP32，验证数值一致性后再增加 `--fp16`。
+
+### 10.2 完整 TensorRT 引擎测速
+
+普通 TensorRT 推理：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+"$TRT_ROOT/bin/trtexec" \
+  --staticPlugins="$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so" \
+  --loadEngine="$FULL_ENGINE" \
+  --warmUp=500 \
+  --duration=0 \
+  --iterations=1000 \
+  --useSpinWait
+```
+
+完整 TensorRT CUDA Graph 推理：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+"$TRT_ROOT/bin/trtexec" \
+  --staticPlugins="$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so" \
+  --loadEngine="$FULL_ENGINE" \
+  --warmUp=500 \
+  --duration=0 \
+  --iterations=1000 \
+  --useCudaGraph \
+  --useSpinWait
+```
+
+确认日志包含：
+
+```text
+Plugins: .../libpvsa_tensorrt_plugins.so
+CUDA Graph: Enabled
+&&&& PASSED TensorRT.trtexec
+```
+
+### 10.3 当前仓库状态
+
+```text
+build/tensorrt/pvsa_build_plugin_engine
+```
+
+目前只构建 PVSA 插件冒烟引擎，不是完整 PVSA 网络引擎。
+完整 ONNX 导出和完整网络 TensorRT 构建入口尚未集成到当前仓库，因此 `pvsa_full.onnx` 和 `pvsa_full.engine` 是完整网络转换完成后的文件名示例，不能用插件冒烟引擎代替。
+
+PyTorch 完整框架测速属于算法性能测试，应使用 `FPS.md` 或 `tools/analysis_tools/benchmark.py`，不应作为 TensorRT 部署流程。

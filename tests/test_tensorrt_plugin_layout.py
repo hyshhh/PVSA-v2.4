@@ -56,10 +56,10 @@ def test_tensorrt_plugin_sources_are_self_contained():
     assert "libcudnn.so.8" in readme
     assert "--plugins=\"$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so\"" in deploy_readme
     assert "--plugins=\"$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so\"" in readme
-    assert "完整 PVSA 框架测速" in deploy_readme
-    assert "tools/analysis_tools/benchmark.py" in deploy_readme
-    assert "full_framework_cuda_graph" in deploy_readme
-    assert "--no-checkpoint" in deploy_readme
+    assert "完整 PVSA TensorRT 框架测速" in deploy_readme
+    assert "FULL_ONNX" in deploy_readme
+    assert "FULL_ENGINE" in deploy_readme
+    assert "--useCudaGraph" in deploy_readme
     assert "--no-checkpoint" in benchmark
     assert "random_init" in benchmark
     assert "CUDACXX=/usr/bin/nvcc" in deploy_readme

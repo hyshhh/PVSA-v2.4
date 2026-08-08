@@ -188,3 +188,48 @@ src/pvsa_topp_plugins.cpp
 tools/build_plugin_engine.cpp
 CMakeLists.txt
 ```
+
+## 10. 完整 PVSA TensorRT 框架测速
+
+完整 TensorRT 部署流程：
+
+```text
+完整 PVSA 模型 -> 固定形状 ONNX -> TensorRT 完整引擎 -> trtexec
+```
+
+完整引擎必须包含主干、PVSA、输出投影和解码头，并将 PVSA 自定义节点映射为：
+
+```text
+PVSA_TopP_Route
+PVSA_TopP_Flash
+```
+
+构建完整引擎：
+
+```bash
+export FULL_ONNX=work_dirs/pvsa_full.onnx
+export FULL_ENGINE=work_dirs/pvsa_full.engine
+
+CUDA_VISIBLE_DEVICES=1 \
+"$TRT_ROOT/bin/trtexec" \
+  --onnx="$FULL_ONNX" \
+  --staticPlugins="$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so" \
+  --saveEngine="$FULL_ENGINE" \
+  --verbose
+```
+
+完整引擎测速：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+"$TRT_ROOT/bin/trtexec" \
+  --staticPlugins="$PWD/build/tensorrt/libpvsa_tensorrt_plugins.so" \
+  --loadEngine="$FULL_ENGINE" \
+  --warmUp=500 \
+  --duration=0 \
+  --iterations=1000 \
+  --useCudaGraph \
+  --useSpinWait
+```
+
+当前 `pvsa_build_plugin_engine` 只生成插件冒烟引擎，不是完整 PVSA 网络引擎；完整 ONNX 导出入口尚未集成。PyTorch 完整框架测速请放在 `FPS.md` 或使用 `tools/analysis_tools/benchmark.py`。
