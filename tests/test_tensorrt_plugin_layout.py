@@ -49,6 +49,10 @@ def test_tensorrt_plugin_sources_are_self_contained():
     assert "TRT_ROOT" in deploy_readme
     assert "TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz" in deploy_readme
     assert "CUDA_VISIBLE_DEVICES=1" in deploy_readme
+    assert "CUDNN_ROOT" in deploy_readme
+    assert "libcudnn.so.8" in deploy_readme
+    assert "CUDNN_ROOT" in readme
+    assert "libcudnn.so.8" in readme
     assert "CUDACXX=/usr/bin/nvcc" in deploy_readme
     assert "-DCMAKE_CUDA_COMPILER=/usr/bin/nvcc" in deploy_readme
     assert "/usr/local/cuda-12.0" not in deploy_readme

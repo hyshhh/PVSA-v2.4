@@ -22,8 +22,9 @@ H、W：必须是 7 的倍数
 ```bash
 export CUDACXX=/usr/bin/nvcc
 export TRT_ROOT=$HOME/opt/TensorRT-8.6.1.6
+export CUDNN_ROOT=$CONDA_PREFIX/lib/python3.8/site-packages/torch/lib
 export PATH=$TRT_ROOT/bin:/usr/bin:$PATH
-export LD_LIBRARY_PATH=$TRT_ROOT/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CUDNN_ROOT:$TRT_ROOT/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 ```
 
 下载文件名：
@@ -46,7 +47,17 @@ ls -lh "$TRT_ROOT/include/NvInfer.h"
 ls -lh "$TRT_ROOT/lib/libnvinfer.so"
 ```
 
-## 3. 编译普通版
+## 3. 检查 cuDNN 8
+
+```bash
+find "$CONDA_PREFIX" -type f -name 'libcudnn.so.8' -print
+ls -lh "$CUDNN_ROOT/libcudnn.so.8"
+ldd "$CUDNN_ROOT/libcudnn.so.8" | grep "not found"
+```
+
+找不到 `libcudnn.so.8` 时，先安装 cuDNN 8；如果路径不同，修改 `CUDNN_ROOT`。
+
+## 4. 编译普通版
 
 ```bash
 rm -rf build/tensorrt
@@ -67,7 +78,7 @@ build/tensorrt/libpvsa_tensorrt_plugins.so
 build/tensorrt/pvsa_build_plugin_engine
 ```
 
-## 4. 编译快速版
+## 5. 编译快速版
 
 ```bash
 rm -rf build/tensorrt_fast
@@ -89,7 +100,7 @@ build/tensorrt_fast/libpvsa_tensorrt_plugins.so
 build/tensorrt_fast/pvsa_build_plugin_engine
 ```
 
-## 5. 构建测试引擎
+## 6. 构建测试引擎
 
 普通版：
 
@@ -112,7 +123,7 @@ build/tensorrt_fast/pvsa_build_plugin_engine \
   --height 56 --width 56 --kv-len 64 --topk 8
 ```
 
-## 6. 运行测试
+## 7. 运行测试
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
@@ -127,7 +138,7 @@ CUDA_VISIBLE_DEVICES=1 \
 work_dirs/pvsa_plugin_smoke_fast.engine
 ```
 
-## 7. 接入接口
+## 8. 接入接口
 
 ```text
 PVSA_TopP_Route
@@ -154,7 +165,7 @@ PVSA_TopP_Flash
 
 完整网络需要自行连接 QKV 投影、窗口重排、插件、输出投影和解码头。第一版为固定形状 FP32 接口，建议先验证数值一致性，再扩展 FP16、动态输入和 INT8。
 
-## 8. 文件
+## 9. 文件
 
 ```text
 include/pvsa_topp_kernel.cuh

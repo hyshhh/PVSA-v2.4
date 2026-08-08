@@ -7,11 +7,12 @@ cd /media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-v3.0
 
 export CUDACXX=/usr/bin/nvcc
 export TRT_ROOT=$HOME/opt/TensorRT-8.6.1.6
+export CUDNN_ROOT=$CONDA_PREFIX/lib/python3.8/site-packages/torch/lib
 export PYTHONPATH=$PWD:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
 export PATH=$TRT_ROOT/bin:/usr/bin:$PATH
-export LD_LIBRARY_PATH=$TRT_ROOT/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CUDNN_ROOT:$TRT_ROOT/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 ```
 
 检查 CUDA：
@@ -21,7 +22,19 @@ nvcc --version
 cmake --version
 ```
 
-## 2. 卸载 CUDA 13 TensorRT
+## 2. 检查 cuDNN 8
+
+TensorRT 8.6.1 需要 `libcudnn.so.8`。当前 `openmmlab` 环境使用：
+
+```bash
+find "$CONDA_PREFIX" -type f -name 'libcudnn.so.8' -print
+ls -lh "$CUDNN_ROOT/libcudnn.so.8"
+ldd "$CUDNN_ROOT/libcudnn.so.8" | grep "not found"
+```
+
+如果路径不同，按 `find` 的结果修改 `CUDNN_ROOT`；找不到 `libcudnn.so.8` 时先安装 cuDNN 8。
+
+## 3. 卸载 CUDA 13 TensorRT
 
 只卸载已安装的 TensorRT 相关软件包，不要使用不存在的 `libnvparsers*` 软件包名：
 
@@ -31,7 +44,7 @@ sudo apt-get autoremove -y
 sudo ldconfig
 ```
 
-## 3. 下载并解压 CUDA 12.0 对应的 TensorRT
+## 4. 下载并解压 CUDA 12.0 对应的 TensorRT
 
 TensorRT 压缩包需要从 NVIDIA 官方页面下载。登录后下载：
 
@@ -60,7 +73,7 @@ ls -lh "$TRT_ROOT/lib/libnvinfer.so"
 ls -lh "$TRT_ROOT/bin/trtexec"
 ```
 
-## 4. 编译普通版
+## 5. 编译普通版
 
 普通版不启用快速数学，用于先验证数值一致性。
 
@@ -85,7 +98,7 @@ ls -lh build/tensorrt/libpvsa_tensorrt_plugins.so
 ls -lh build/tensorrt/pvsa_build_plugin_engine
 ```
 
-## 5. 编译快速版
+## 6. 编译快速版
 
 ```bash
 rm -rf build/tensorrt_fast
@@ -109,7 +122,7 @@ ls -lh build/tensorrt_fast/libpvsa_tensorrt_plugins.so
 ls -lh build/tensorrt_fast/pvsa_build_plugin_engine
 ```
 
-## 6. 构建插件测试引擎
+## 7. 构建插件测试引擎
 
 `86` 对应 RTX A6000。GPU 2 当前负载较高，优先使用 GPU 1：
 
@@ -145,7 +158,7 @@ build/tensorrt_fast/pvsa_build_plugin_engine \
   --topk 8
 ```
 
-## 7. 使用 `trtexec` 测试
+## 8. 使用 `trtexec` 测试
 
 普通版：
 
@@ -171,7 +184,7 @@ CUDA_VISIBLE_DEVICES=1 \
   --iterations=1000
 ```
 
-## 8. 插件接口与限制
+## 9. 插件接口与限制
 
 ```text
 PVSA_TopP_Route
