@@ -53,7 +53,7 @@ public:
   nvinfer1::DataType getOutputDataType(
       int index, const nvinfer1::DataType* inputTypes,
       int nbInputs) const noexcept override;
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
   bool isOutputBroadcastAcrossBatch(int outputIndex,
                                      const bool* inputIsBroadcasted,
                                      int nbInputs) const noexcept override;
@@ -125,7 +125,7 @@ public:
   nvinfer1::DataType getOutputDataType(
       int index, const nvinfer1::DataType* inputTypes,
       int nbInputs) const noexcept override;
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
   bool isOutputBroadcastAcrossBatch(int outputIndex,
                                      const bool* inputIsBroadcasted,
                                      int nbInputs) const noexcept override;

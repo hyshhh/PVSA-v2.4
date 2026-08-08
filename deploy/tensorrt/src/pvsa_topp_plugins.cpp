@@ -333,7 +333,7 @@ nvinfer1::DataType TopPRoutePlugin::getOutputDataType(
                     : nvinfer1::DataType::kINT32;
 }
 
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
 bool TopPRoutePlugin::isOutputBroadcastAcrossBatch(
     int output_index, const bool* input_is_broadcasted,
     int nb_inputs) const noexcept {
@@ -601,7 +601,7 @@ nvinfer1::DataType TopPFlashPlugin::getOutputDataType(
   return nvinfer1::DataType::kFLOAT;
 }
 
-#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 10
+#if !defined(NV_TENSORRT_MAJOR) || NV_TENSORRT_MAJOR < 8
 bool TopPFlashPlugin::isOutputBroadcastAcrossBatch(
     int output_index, const bool* input_is_broadcasted,
     int nb_inputs) const noexcept {

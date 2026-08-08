@@ -33,6 +33,7 @@ def test_tensorrt_plugin_sources_are_self_contained():
     assert "TENSORRT_INCLUDE_DIR" in cmake
     assert "TENSORRT_LIBRARY" in cmake
     assert "NV_TENSORRT_MAJOR < 10" in plugin
+    assert "NV_TENSORRT_MAJOR < 8" in plugin
     assert "CMAKE_CUDA_HOST_COMPILER" in cmake
     assert "FP32" in readme
     assert "PVSA-Net v3.0" in root_readme
