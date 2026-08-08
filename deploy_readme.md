@@ -232,3 +232,76 @@ deploy/tensorrt/src/
 deploy/tensorrt/tools/build_plugin_engine.cpp
 deploy/tensorrt/CMakeLists.txt
 ```
+
+## 10. 完整 PVSA 框架测速
+
+`pvsa_build_plugin_engine` 只用于插件冒烟测试。完整模型测速使用项目自带的
+`tools/analysis_tools/benchmark.py`，包含完整主干、解码头和预测流程；请将权重路径替换为实际文件。
+
+```bash
+export CHECKPOINT=/path/to/epoch_10.pth
+export PYTHONPATH=$PWD:$PYTHONPATH
+```
+
+普通完整框架测速：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  "$CHECKPOINT" \
+  --cfg-options \
+  model.backbone.topp_flash_backend=None \
+  model.backbone.topp_flash_debug=false \
+  --input-size 256 256 \
+  --batch-size 1 \
+  --repeat-times 5 \
+  --cudnn-benchmark \
+  --work-dir work_dirs/benchmark/full_framework_eager
+```
+
+完整框架 CUDA 核测速：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  "$CHECKPOINT" \
+  --cfg-options \
+  model.backbone.topp_flash_backend=cuda \
+  model.backbone.topp_flash_debug=false \
+  --input-size 256 256 \
+  --batch-size 1 \
+  --repeat-times 5 \
+  --cudnn-benchmark \
+  --work-dir work_dirs/benchmark/full_framework_cuda
+```
+
+完整框架 CUDA Graph 测速：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+python tools/analysis_tools/benchmark.py \
+  configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
+  "$CHECKPOINT" \
+  --cfg-options \
+  model.backbone.topp_flash_backend=cuda \
+  model.backbone.topp_flash_debug=false \
+  --input-size 256 256 \
+  --batch-size 1 \
+  --repeat-times 5 \
+  --cudnn-benchmark \
+  --cuda-graph \
+  --work-dir work_dirs/benchmark/full_framework_cuda_graph
+```
+
+输出重点查看：
+
+```text
+Overall fps
+Average fps of 5 evaluations
+The variance of 5 evaluations
+```
+
+`--cuda-graph` 要求固定输入尺寸，并且必须使用 `topp_flash_backend=cuda`。
+完整框架测速结果与 TensorRT 插件冒烟测速结果分开记录，不要将后者的吞吐率作为完整 PVSA 网络的 FPS。
