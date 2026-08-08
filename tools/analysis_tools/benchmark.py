@@ -19,7 +19,15 @@ from mmseg.registry import MODELS
 def parse_args():
     parser = argparse.ArgumentParser(description='MMSeg benchmark a model')
     parser.add_argument('config', help='test config file path')
-    parser.add_argument('checkpoint', help='checkpoint file')
+    parser.add_argument(
+        'checkpoint',
+        nargs='?',
+        default=None,
+        help='optional checkpoint file; omit it when using --no-checkpoint')
+    parser.add_argument(
+        '--no-checkpoint',
+        action='store_true',
+        help='skip checkpoint loading and benchmark randomly initialized weights')
     parser.add_argument(
         '--log-interval', type=int, default=50, help='interval of logging')
     parser.add_argument(
@@ -84,6 +92,10 @@ def main():
         raise ValueError('--repeat-times must be a positive integer')
     if args.log_interval <= 0:
         raise ValueError('--log-interval must be a positive integer')
+    if args.no_checkpoint and args.checkpoint is not None:
+        raise ValueError('--no-checkpoint cannot be used with a checkpoint path')
+    if not args.no_checkpoint and args.checkpoint is None:
+        raise ValueError('请提供权重文件，或使用 --no-checkpoint 进行随机权重测速')
 
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
@@ -129,7 +141,11 @@ def main():
     # （已在前面 args 处理时设置，这里不再硬编码覆盖）
     cfg.model.pretrained = None
 
-    benchmark_dict = dict(config=args.config, unit='img / s')
+    benchmark_dict = dict(
+        config=args.config,
+        checkpoint=None if args.no_checkpoint else args.checkpoint,
+        random_init=args.no_checkpoint,
+        unit='img / s')
     overall_fps_list = []
     # 单图延迟测试默认 batch_size=1；--batch-size 已在前面对 cfg 设置
     if args.batch_size is None:
@@ -141,11 +157,14 @@ def main():
         if len(data_loader) == 0:
             raise RuntimeError('The test dataloader is empty')
 
-        # build the model and load checkpoint
+        # build the model; checkpoint loading is optional for speed-only tests
         cfg.model.train_cfg = None
         model = MODELS.build(cfg.model)
 
-        load_checkpoint(model, args.checkpoint, map_location='cpu')
+        if args.no_checkpoint:
+            print('未加载权重：使用随机初始化参数进行速度测试')
+        else:
+            load_checkpoint(model, args.checkpoint, map_location='cpu')
 
         if torch.cuda.is_available():
             model = model.cuda()

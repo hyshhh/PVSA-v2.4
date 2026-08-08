@@ -236,10 +236,9 @@ deploy/tensorrt/CMakeLists.txt
 ## 10. 完整 PVSA 框架测速
 
 `pvsa_build_plugin_engine` 只用于插件冒烟测试。完整模型测速使用项目自带的
-`tools/analysis_tools/benchmark.py`，包含完整主干、解码头和预测流程；请将权重路径替换为实际文件。
+`tools/analysis_tools/benchmark.py`，包含完整主干、解码头和预测流程；该流程不加载训练权重，仅使用随机初始化参数测试完整框架速度；不用于精度验证。
 
 ```bash
-export CHECKPOINT=/path/to/epoch_10.pth
 export PYTHONPATH=$PWD:$PYTHONPATH
 ```
 
@@ -249,7 +248,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 CUDA_VISIBLE_DEVICES=1 \
 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  "$CHECKPOINT" \
+  --no-checkpoint \
   --cfg-options \
   model.backbone.topp_flash_backend=None \
   model.backbone.topp_flash_debug=false \
@@ -266,7 +265,7 @@ python tools/analysis_tools/benchmark.py \
 CUDA_VISIBLE_DEVICES=1 \
 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  "$CHECKPOINT" \
+  --no-checkpoint \
   --cfg-options \
   model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=false \
@@ -283,7 +282,7 @@ python tools/analysis_tools/benchmark.py \
 CUDA_VISIBLE_DEVICES=1 \
 python tools/analysis_tools/benchmark.py \
   configs-h/biformer/biformer_mm-20k_chase_db1-512x512.py \
-  "$CHECKPOINT" \
+  --no-checkpoint \
   --cfg-options \
   model.backbone.topp_flash_backend=cuda \
   model.backbone.topp_flash_debug=false \

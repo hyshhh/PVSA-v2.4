@@ -14,6 +14,7 @@ def test_tensorrt_plugin_sources_are_self_contained():
     readme = (deploy / "README.md").read_text(encoding="utf-8")
     root_readme = (root / "README.md").read_text(encoding="utf-8")
     deploy_readme = (root / "deploy_readme.md").read_text(encoding="utf-8")
+    benchmark = (root / "tools" / "analysis_tools" / "benchmark.py").read_text(encoding="utf-8")
 
     assert "torch::" not in kernel
     assert "torch::" not in plugin
@@ -58,6 +59,9 @@ def test_tensorrt_plugin_sources_are_self_contained():
     assert "完整 PVSA 框架测速" in deploy_readme
     assert "tools/analysis_tools/benchmark.py" in deploy_readme
     assert "full_framework_cuda_graph" in deploy_readme
+    assert "--no-checkpoint" in deploy_readme
+    assert "--no-checkpoint" in benchmark
+    assert "random_init" in benchmark
     assert "CUDACXX=/usr/bin/nvcc" in deploy_readme
     assert "-DCMAKE_CUDA_COMPILER=/usr/bin/nvcc" in deploy_readme
     assert "/usr/local/cuda-12.0" not in deploy_readme
