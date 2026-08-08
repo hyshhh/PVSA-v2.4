@@ -5,13 +5,13 @@
 ```bash
 cd /media/ddc/新加卷/hys/hysnew3/PVSA/PVSA-v3.0
 
-export CUDA_HOME=/usr/local/cuda-12.0
+export CUDACXX=/usr/bin/nvcc
 export TRT_ROOT=$HOME/opt/TensorRT-8.6.1.6
 export PYTHONPATH=$PWD:$PYTHONPATH
 export CC=/usr/bin/gcc-11
 export CXX=/usr/bin/g++-11
-export PATH=$TRT_ROOT/bin:$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$TRT_ROOT/lib:$CUDA_HOME/lib64:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+export PATH=$TRT_ROOT/bin:/usr/bin:$PATH
+export LD_LIBRARY_PATH=$TRT_ROOT/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 ```
 
 检查 CUDA：
@@ -71,7 +71,7 @@ cmake -S deploy/tensorrt \
   -B build/tensorrt \
   -DTENSORRT_INCLUDE_DIR="$TRT_ROOT/include" \
   -DTENSORRT_LIBRARY="$TRT_ROOT/lib/libnvinfer.so" \
-  -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" \
+  -DCMAKE_CUDA_COMPILER=/usr/bin/nvcc \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12
 
@@ -94,7 +94,7 @@ cmake -S deploy/tensorrt \
   -B build/tensorrt_fast \
   -DTENSORRT_INCLUDE_DIR="$TRT_ROOT/include" \
   -DTENSORRT_LIBRARY="$TRT_ROOT/lib/libnvinfer.so" \
-  -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" \
+  -DCMAKE_CUDA_COMPILER=/usr/bin/nvcc \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 \
   -DPVSA_TRT_FAST_MATH=ON

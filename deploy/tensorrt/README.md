@@ -20,10 +20,10 @@ H、W：必须是 7 的倍数
 当前项目使用 CUDA 12.0，建议使用 TensorRT 8.6.1.6 的 CUDA 12.0 压缩包，不要使用 CUDA 13.x 版本的软件包。
 
 ```bash
-export CUDA_HOME=/usr/local/cuda-12.0
+export CUDACXX=/usr/bin/nvcc
 export TRT_ROOT=$HOME/opt/TensorRT-8.6.1.6
-export PATH=$TRT_ROOT/bin:$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$TRT_ROOT/lib:$CUDA_HOME/lib64:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+export PATH=$TRT_ROOT/bin:/usr/bin:$PATH
+export LD_LIBRARY_PATH=$TRT_ROOT/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 ```
 
 下载文件名：
@@ -54,7 +54,7 @@ cmake -S deploy/tensorrt \
   -B build/tensorrt \
   -DTENSORRT_INCLUDE_DIR="$TRT_ROOT/include" \
   -DTENSORRT_LIBRARY="$TRT_ROOT/lib/libnvinfer.so" \
-  -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" \
+  -DCMAKE_CUDA_COMPILER=/usr/bin/nvcc \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12
 cmake --build build/tensorrt -j$(nproc)
@@ -75,7 +75,7 @@ cmake -S deploy/tensorrt \
   -B build/tensorrt_fast \
   -DTENSORRT_INCLUDE_DIR="$TRT_ROOT/include" \
   -DTENSORRT_LIBRARY="$TRT_ROOT/lib/libnvinfer.so" \
-  -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" \
+  -DCMAKE_CUDA_COMPILER=/usr/bin/nvcc \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 \
   -DPVSA_TRT_FAST_MATH=ON
